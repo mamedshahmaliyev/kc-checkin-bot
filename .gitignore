@@ -1,0 +1,5 @@
+.venv
+compose.override.yml
+logs
+subscribers
+.env
