@@ -68,7 +68,7 @@ async def on_startup(bot: Bot):
     ])
 dp = Dispatcher()
 
-
+os.makedirs('subscribers', exist_ok=True)
 def is_subscribed(message: Message) -> dict | None:
     if os.path.exists(f'subscribers/{message.from_user.id}.json'):
         return json.load(open(f'subscribers/{message.from_user.id}.json'))
@@ -156,6 +156,8 @@ async def check_reminders_loop():
             if f.endswith('.json'):
                 s = json.load(open(f'subscribers/{f}'))
                 n = datetime.now(timezone.utc)
+                if n.weekday() >= 5:
+                    continue
                 ymd, hm =  n.strftime('%Y-%m-%d'), n.strftime('%H:%M')
                 log = s.get('log', {})
                 dayin = datetime.fromisoformat(log.get('dayin', "2000-12-01T07:15:37.133310+00:00"))
@@ -177,7 +179,6 @@ async def check_reminders_loop():
         await asyncio.sleep(60*5)
 
 async def main() -> None:
-    
     dp.startup.register(on_startup)
     asyncio.create_task(check_reminders_loop())
     logger.info("🤖 Bot is listening for messages...")

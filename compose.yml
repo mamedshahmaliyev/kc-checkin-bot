@@ -1,13 +1,3 @@
-networks:
-  kcss-network:
-    name: kcss-network
-    external: true
-
-x-network-restart: &network-restart
-  networks:
-    - kcss-network
-  restart: unless-stopped
-
 services:
   kc-checkin-bot:
     build:
