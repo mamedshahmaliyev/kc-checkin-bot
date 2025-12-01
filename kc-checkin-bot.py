@@ -172,7 +172,7 @@ async def check_reminders_loop():
                     await bot.send_message(s['id'], "Reminder: ➡️ 💼 Day IN!")
                 if has_dayin and not has_lunchout and hm >= '11:00':
                     await bot.send_message(s['id'], "Reminder: ➡️ 🍽️ Lunch OUT!")
-                if has_dayin and has_lunchout and not has_lunchin and lunchout + timedelta(hours=1) >= n:
+                if has_dayin and has_lunchout and not has_lunchin and lunchout + timedelta(hours=1) <= n:
                     await bot.send_message(s['id'], "Reminder: ↩️ 🍽️ Lunch IN!")
                 if has_dayin and has_lunchin and has_lunchout and not has_dayout and hm >= '16:30':
                     await bot.send_message(s['id'], "Reminder: ↩️ 💼 Day OUT!")
