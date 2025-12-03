@@ -55,6 +55,13 @@ from dataclasses import dataclass, fields, asdict
 from aiogram import Bot, Dispatcher
 from aiogram.filters import Command, CommandObject
 from aiogram.types import Message, BotCommand
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.fsm.storage.memory import MemoryStorage
+
+# Define FSM states for subscription
+class SubscribeStates(StatesGroup):
+    waiting_for_password = State()
 
 async def on_startup(bot: Bot):
     await bot.set_my_commands([
@@ -62,11 +69,14 @@ async def on_startup(bot: Bot):
         BotCommand(command="lunchout", description="Clock OUT for LUNCH"),
         BotCommand(command="lunchin", description="Clock IN for LUNCH"),
         BotCommand(command="dayout", description="Clock OUT for the DAY"),
-        BotCommand(command="subscribe", description="Get reminders for the day"),
-        BotCommand(command="reset", description="Reset all actions for the day"),
-        BotCommand(command="log", description="Show action log for the day"),
+        BotCommand(command="subscribe", description="Subscribe to get reminders for the day"),
+        BotCommand(command="reset", description="Reset log for the day"),
+        BotCommand(command="log", description="Show log for the day"),
+        BotCommand(command="unsubscribe", description="Unsubscribe from reminders"),
+        BotCommand(command="cancel", description="Cancel the current action"),
     ])
-dp = Dispatcher()
+
+dp = Dispatcher(storage=MemoryStorage())
 
 os.makedirs('subscribers', exist_ok=True)
 def is_subscribed(message: Message) -> dict | None:
@@ -113,7 +123,7 @@ def status(message: Message) -> str:
 async def command_start_handler(message: Message) -> None:
     await message.answer("Hello! I'm KC Checkin Bot. I can remind you to clock in and out for the day and lunch.")
     
-@dp.message(Command("dayin", "dayout", "lunchin", "lunchout", "status"))
+@dp.message(Command("dayin", "dayout", "lunchin", "lunchout", "log"))
 async def command_action_handler(message: Message, command: CommandObject) -> None:
     if not (s := is_subscribed(message)):
         await message.answer("❌ You're not subscribed! Please subscribe first.")
@@ -132,21 +142,62 @@ async def command_reset_handler(message: Message) -> None:
     await message.answer(f"{status(message)}")
     
 @dp.message(Command("subscribe", "follow"))
-async def command_subscribe_handler(message: Message) -> None:
+async def command_subscribe_handler(message: Message, state: FSMContext) -> None:
     if is_subscribed(message):
         await message.answer("✅ You're already subscribed!")
         return
     
+    # Check if password was provided inline (backward compatibility)
     try:
-        if message.text.split(maxsplit=1)[1] == os.getenv('SUBSCRIBER_PASSWORD'):
+        password = message.text.split(maxsplit=1)[1]
+        if password == os.getenv('SUBSCRIBER_PASSWORD'):
             logger.info(f"/subscribe from {message.from_user.full_name} ({message.from_user.id})")
             subscribe(message)
             await message.answer("✅ Password correct! You've subscribed to reminders!")
         else:
             await message.answer("❌ Incorrect password. Please try again.")
-    except IndexError:
-        await message.answer("❌ Please provide a password: /subscribe YOUR_PASSWORD")
         return
+    except IndexError:
+        pass  # No inline password, proceed to ask for it
+    
+    # Ask for password in next message
+    await state.set_state(SubscribeStates.waiting_for_password)
+    await message.answer("🔐 Please enter your subscriber password:")
+    
+@dp.message(Command("unsubscribe", "unfollow"))
+async def command_unsubscribe_handler(message: Message) -> None:
+    if os.path.exists(f'subscribers/{message.from_user.id}.json'):
+        os.remove(f'subscribers/{message.from_user.id}.json')
+        await message.answer("✅ You've unsubscribed from reminders!")
+    else:
+        await message.answer("❌ You're not subscribed! Please subscribe first.")
+
+@dp.message(Command("cancel"))
+async def command_cancel_handler(message: Message, state: FSMContext) -> None:
+    current_state = await state.get_state()
+    if current_state == SubscribeStates.waiting_for_password:
+        await state.clear()
+        await message.answer("❌ Subscription cancelled.")
+    else:
+        await message.answer("ℹ️ Nothing to cancel.")
+
+@dp.message(SubscribeStates.waiting_for_password)
+async def process_password_handler(message: Message, state: FSMContext) -> None:
+    # Check if user wants to cancel
+    if message.text and message.text.strip().lower() in ['/cancel', 'cancel']:
+        await state.clear()
+        await message.answer("❌ Subscription cancelled.")
+        return
+    
+    password = message.text.strip()
+    
+    if password == os.getenv('SUBSCRIBER_PASSWORD'):
+        logger.info(f"/subscribe from {message.from_user.full_name} ({message.from_user.id})")
+        subscribe(message)
+        await message.answer("✅ Password correct! You've subscribed to reminders!")
+        await state.clear()
+    else:
+        await message.answer("❌ Incorrect password. Please try again or type /cancel to abort.")
             
 bot = Bot(token=os.getenv("BOT_TOKEN"))
 
