@@ -58,13 +58,13 @@ from aiogram.types import Message, BotCommand
 
 async def on_startup(bot: Bot):
     await bot.set_my_commands([
-        BotCommand(command="subscribe", description="Get reminders for the day"),
         BotCommand(command="dayin", description="Clock IN for the DAY"),
-        BotCommand(command="dayout", description="Clock OUT for the DAY"),
-        BotCommand(command="lunchin", description="Clock IN for LUNCH"),
         BotCommand(command="lunchout", description="Clock OUT for LUNCH"),
-        BotCommand(command="reset", description="Reset all actions"),
-        BotCommand(command="status", description="Show status of actions"),
+        BotCommand(command="lunchin", description="Clock IN for LUNCH"),
+        BotCommand(command="dayout", description="Clock OUT for the DAY"),
+        BotCommand(command="subscribe", description="Get reminders for the day"),
+        BotCommand(command="reset", description="Reset all actions for the day"),
+        BotCommand(command="log", description="Show action log for the day"),
     ])
 dp = Dispatcher()
 
