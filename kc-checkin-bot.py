@@ -118,15 +118,17 @@ def reset_actions(message: Message):
 
 def my_info(message: Message) -> str:
     s = subscriber(message)
-    msg = f"👤 <b>{message.from_user.full_name}</b>:\n"
-    msg += f"Daily log:\n"
+    msg = ""
+    # msg += f"👤 <b>{message.from_user.full_name}</b>\n\n"
+    msg += f"⏱️ Log for <code>{datetime.now(ZoneInfo(s.get('timezone', 'UTC'))).strftime('%Y-%m-%d, %a')}</code>:\n"
     for k, v in s['log'].items():
-        msg += f"  {k.upper()}: <code>{datetime.fromisoformat(v).astimezone(ZoneInfo(s.get('timezone', 'UTC'))).strftime('%Y-%m-%d %H:%M:%S')}</code>\n" if v and datetime.fromisoformat(v).astimezone(ZoneInfo(s.get('timezone', 'UTC'))).strftime('%Y-%m-%d %H:%M:%S') >= datetime.now(ZoneInfo(s.get('timezone', 'UTC'))).strftime('%Y-%m-%d') else f"  {k.upper()}:\n"
-    msg += f"Timezone: <code>{s.get('timezone', 'UTC')}</code>\n"
-    msg += f"Weekly schedule:\n"
+        msg += f"  {k.upper()} - <code>{datetime.fromisoformat(v).astimezone(ZoneInfo(s.get('timezone', 'UTC'))).strftime('%H:%M:%S')}</code>\n" if v and datetime.fromisoformat(v).astimezone(ZoneInfo(s.get('timezone', 'UTC'))).strftime('%Y-%m-%d') == datetime.now(ZoneInfo(s.get('timezone', 'UTC'))).strftime('%Y-%m-%d') else f"  {k.upper()} -\n"
+    msg += f"\n📅 Weekly Schedule:\n"
     msg += "[week_day,day_in,lunch_out,day_out]\n"
     for i, v in enumerate(s.get('weekly_schedule', ['N/A']*7)):
         msg += f"<code>{v}</code> [{calendar.day_abbr[i]}]\n" if v else f"N/A [{calendar.day_abbr[i]}]\n"
+    msg += f"\n🌍 Timezone: <code>{s.get('timezone', 'UTC')}</code>\n"
+    
     return msg.strip()
 
 @dp.message(Command("start"))
@@ -365,13 +367,13 @@ async def check_reminders_loop():
                 dayout = datetime.fromisoformat(log.get('dayout', "2000-12-01T07:15:37.133310+00:00"))
                 has_dayout = dayout.strftime('%Y-%m-%d') == ymd
                 if not has_dayin and hm >= '05:00':
-                    await bot.send_message(s['id'], "Reminder: ➡️ 💼 Day IN!")
+                    await bot.send_message(s['id'], "Reminder: ➡️🚪 Day IN!")
                 if has_dayin and not has_lunchout and hm >= '11:00':
-                    await bot.send_message(s['id'], "Reminder: ➡️ 🍽️ Lunch OUT!")
+                    await bot.send_message(s['id'], "Reminder: ➡️🍽️ Lunch OUT!")
                 if has_dayin and has_lunchout and not has_lunchin and lunchout + timedelta(hours=1) <= n:
-                    await bot.send_message(s['id'], "Reminder: ↩️ 🍽️ Lunch IN!")
+                    await bot.send_message(s['id'], "Reminder: ↩️🍽️ Lunch IN!")
                 if has_dayin and has_lunchin and has_lunchout and not has_dayout and hm >= '16:30':
-                    await bot.send_message(s['id'], "Reminder: ↩️ 💼 Day OUT!")
+                    await bot.send_message(s['id'], "Reminder: 🔚🚪 Day OUT!")
         await asyncio.sleep(60*5)
 
 async def main() -> None:
