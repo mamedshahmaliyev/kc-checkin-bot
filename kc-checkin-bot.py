@@ -59,9 +59,13 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 
+import calendar
+
 # Define FSM states for subscription
 class SubscribeStates(StatesGroup):
     waiting_for_password = State()
+    waiting_for_daily_schedule = State()
+    waiting_for_timezone = State()
 
 async def on_startup(bot: Bot):
     await bot.set_my_commands([
@@ -70,7 +74,10 @@ async def on_startup(bot: Bot):
         BotCommand(command="lunchin", description="Clock IN for LUNCH"),
         BotCommand(command="dayout", description="Clock OUT for the DAY"),
         BotCommand(command="subscribe", description="Subscribe to get reminders for the day"),
-        BotCommand(command="reset", description="Reset log for the day"),
+        BotCommand(command="my_info", description="Show your info"),
+        BotCommand(command="set_daily_schedule", description="Set your daily schedule for a weekday"),
+        BotCommand(command="set_timezone", description="Set your timezone, default is UTC"),
+        BotCommand(command="reset_day", description="Reset log for the day"),
         BotCommand(command="log", description="Show log for the day"),
         BotCommand(command="unsubscribe", description="Unsubscribe from reminders"),
         BotCommand(command="cancel", description="Cancel the current action"),
@@ -109,19 +116,36 @@ def reset_actions(message: Message):
     json.dump(s, open(f'subscribers/{message.from_user.id}.json', "w"), indent=2, ensure_ascii=False)
     return subscriber(message)
 
-def status(message: Message) -> str:
+def my_info(message: Message) -> str:
     s = subscriber(message)
-    msg = ""
-    for k in ["dayin", "lunchout", "lunchin", "dayout"]:
-        if k in s['log'] and datetime.fromisoformat(s['log'][k]).strftime('%Y-%m-%d') >= datetime.now(timezone.utc).strftime('%Y-%m-%d'):
-            msg += f"{k.upper()}: {datetime.fromisoformat(s['log'][k]).astimezone(ZoneInfo('Asia/Baku')).strftime('%Y-%m-%d %H:%M:%S')}\n"
-        else:
-            msg += f"{k.upper()}:\n"
+    msg = f"👤 <b>{message.from_user.full_name}</b>:\n"
+    msg += f"Daily log:\n"
+    for k, v in s['log'].items():
+        msg += f"  {k.upper()}: <code>{datetime.fromisoformat(v).astimezone(ZoneInfo(s.get('timezone', 'UTC'))).strftime('%Y-%m-%d %H:%M:%S')}</code>\n" if v and datetime.fromisoformat(v).astimezone(ZoneInfo(s.get('timezone', 'UTC'))).strftime('%Y-%m-%d %H:%M:%S') >= datetime.now(ZoneInfo(s.get('timezone', 'UTC'))).strftime('%Y-%m-%d') else f"  {k.upper()}:\n"
+    msg += f"Timezone: <code>{s.get('timezone', 'UTC')}</code>\n"
+    msg += f"Weekly schedule:\n"
+    msg += "[week_day,day_in,lunch_out,day_out]\n"
+    for i, v in enumerate(s.get('weekly_schedule', ['N/A']*7)):
+        msg += f"<code>{v}</code> [{calendar.day_abbr[i]}]\n" if v else f"N/A [{calendar.day_abbr[i]}]\n"
     return msg.strip()
 
 @dp.message(Command("start"))
 async def command_start_handler(message: Message) -> None:
-    await message.answer("Hello! I'm KC Checkin Bot. I can remind you to clock in and out for the day and lunch.")
+    await message.answer("""
+Hello! I'm KC Checkin Bot. 
+I can remind you to clock in and out for the day and lunch.
+
+Use /subscribe to subscribe to reminders.
+Use /my_info to show your current info.
+
+Use /set_daily_schedule to set your daily schedule for a weekday.
+Use /set_timezone to set your timezone, default is UTC.
+
+Checkout menu for more commands.
+
+⚠️ Important: Clocking in/out in this Telegram bot does NOT register in Bamboo HR.
+Please remember to also clock in/out in Bamboo HR itself!
+""".strip())
     
 @dp.message(Command("dayin", "dayout", "lunchin", "lunchout", "log"))
 async def command_action_handler(message: Message, command: CommandObject) -> None:
@@ -131,15 +155,22 @@ async def command_action_handler(message: Message, command: CommandObject) -> No
     cmd = command.command
     if cmd in ["dayin", "dayout", "lunchin", "lunchout"]:
         log_action(message, cmd)
-    await message.answer(f"{status(message)}")
+    await message.answer(f"{my_info(message)}", parse_mode='HTML')
     
-@dp.message(Command("reset"))
+@dp.message(Command("reset_day"))
 async def command_reset_handler(message: Message) -> None:
     if not (s := is_subscribed(message)):
         await message.answer("❌ You're not subscribed! Please subscribe first.")
         return
     reset_actions(message)
-    await message.answer(f"{status(message)}")
+    await message.answer(f"{my_info(message)}", parse_mode='HTML')
+    
+@dp.message(Command("my_info"))
+async def command_my_info_handler(message: Message) -> None:
+    if not (s := is_subscribed(message)):
+        await message.answer("❌ You're not subscribed! Please subscribe first.")
+        return
+    await message.answer(f"{my_info(message)}", parse_mode='HTML')
     
 @dp.message(Command("subscribe", "follow"))
 async def command_subscribe_handler(message: Message, state: FSMContext) -> None:
@@ -164,6 +195,120 @@ async def command_subscribe_handler(message: Message, state: FSMContext) -> None
     await state.set_state(SubscribeStates.waiting_for_password)
     await message.answer("🔐 Please enter your subscriber password:")
     
+@dp.message(Command("set_timezone"))
+async def command_set_timezone_handler(message: Message, state: FSMContext) -> None:
+    await state.set_state(SubscribeStates.waiting_for_timezone)
+    await message.answer("""🌍 <b>Please set your timezone</b>
+
+Enter your timezone in this format (tap to copy):
+
+<code>Asia/Dubai</code>
+<code>Europe/Warsaw</code>
+<code>America/New_York</code>
+<code>Asia/Tokyo</code>
+
+👉 You can find your exact timezone here: https://en.wikipedia.org/wiki/List_of_tz_database_time_zones
+
+If you don’t set one, the bot will use UTC (London time, no DST).
+
+Just copy your city and send it!""",
+parse_mode="HTML")
+    
+def is_valid_timezone(tz_name: str) -> bool:
+    """Returns True if the timezone string exists in the IANA database"""
+    if not tz_name or not isinstance(tz_name, str):
+        return False
+    try:
+        ZoneInfo(tz_name.strip())
+        return True
+    except Exception as e:
+        return False  
+
+@dp.message(SubscribeStates.waiting_for_timezone)
+async def process_timezone_handler(message: Message, state: FSMContext) -> None:
+    await state.clear()
+    s = subscriber(message)
+    if not is_valid_timezone(message.text.strip()):
+        await message.answer("❌ Invalid timezone. Please enter a valid timezone (e.g: 'Asia/Dubai').")
+        return
+    s['timezone'] = message.text.strip()
+    json.dump(s, open(f'subscribers/{message.from_user.id}.json', "w"), indent=2, ensure_ascii=False)
+    await message.answer(f"✅ Timezone set to {message.text.strip()}")
+    await message.answer(f"{my_info(message)}", parse_mode='HTML')
+    
+@dp.message(Command("set_daily_schedule"))
+async def command_set_daily_schedule_handler(message: Message, state: FSMContext) -> None:
+    await state.set_state(SubscribeStates.waiting_for_daily_schedule)
+    await message.answer("""🕒 Please enter your daily schedule for a weekday.
+
+Add schedule in the format:
+<code>week_day,day_in,lunch_out,day_out</code>
+
+week_day: number between 1 and 7 (1 = Monday, 7 = Sunday)
+day_in, lunch_out, day_out: hh:mm in 24-hour format
+
+📋 Example (tap to copy):
+<code>1,09:00,13:00,18:00</code>
+
+→ This sets Monday: in 09:00 · lunch 13:00 · out 18:00
+
+To delete a day: <code>-1</code> (removes Monday)
+
+Use /my_info to see your current schedule.""",
+parse_mode="HTML")
+    
+def is_hh_mm(time_str: str) -> bool:
+    try:
+        datetime.strptime(time_str, "%H:%M")
+        return True
+    except ValueError:
+        return False
+    
+@dp.message(SubscribeStates.waiting_for_daily_schedule)
+async def process_daily_schedule_handler(message: Message, state: FSMContext) -> None:
+    await state.clear()
+    s = subscriber(message)
+    msg = message.text.strip()
+    if msg.startswith('-'):
+        week_day = int(msg.split(',')[0].strip('-'))
+        if not 1 <= week_day <= 7:
+            await message.answer("❌ Invalid week day number. Please enter a number between 1 and 7. 1 is Monday, 7 is Sunday.")
+            return
+        arr = s.get('weekly_schedule', [])
+        if len(arr) != 7:
+            arr = ['N/A' for i in range(7)]
+        arr[week_day - 1] = 'N/A'
+        s['weekly_schedule'] = arr
+        json.dump(s, open(f'subscribers/{message.from_user.id}.json', "w"), indent=2, ensure_ascii=False)
+        await message.answer(f"✅ Weekly schedule updated.")
+        await message.answer(f"{my_info(message)}", parse_mode='HTML')
+        return
+    week_day, day_in, lunch_out, day_out = message.text.split(',')
+    if not 1 <= int(week_day := week_day.strip()) <= 7:
+        await message.answer("❌ Invalid week day number. Please enter a number between 1 and 7. 1 is Monday, 7 is Sunday.")
+        return
+    week_day = int(week_day)
+    if not is_hh_mm(day_in := day_in.strip()):
+        await message.answer("❌ Invalid day in time. Please enter a valid time in the format hh:mm.")
+        return
+    if not is_hh_mm(lunch_out := lunch_out.strip()):
+        await message.answer("❌ Invalid lunch out time. Please enter a valid time in the format hh:mm.")
+        return
+    if not is_hh_mm(day_out := day_out.strip()):
+        await message.answer("❌ Invalid day out time. Please enter a valid time in the format hh:mm.")
+        return
+    arr = s.get('weekly_schedule', [])
+    if len(arr) != 7:
+        arr = ['N/A' for i in range(7)]
+    arr[week_day - 1] = f"{week_day},{day_in},{lunch_out},{day_out}"
+    s['weekly_schedule'] = arr
+    json.dump(s, open(f'subscribers/{message.from_user.id}.json', "w"), indent=2, ensure_ascii=False)
+    await message.answer(f"✅ Your updated weekly schedule is:\n{json.dumps(subscriber(message)['weekly_schedule'], indent=2, ensure_ascii=False)}")
+    await message.answer(f"{my_info(message)}", parse_mode='HTML')
+    
+
+    
+    
 @dp.message(Command("unsubscribe", "unfollow"))
 async def command_unsubscribe_handler(message: Message) -> None:
     if os.path.exists(f'subscribers/{message.from_user.id}.json'):
@@ -175,9 +320,9 @@ async def command_unsubscribe_handler(message: Message) -> None:
 @dp.message(Command("cancel"))
 async def command_cancel_handler(message: Message, state: FSMContext) -> None:
     current_state = await state.get_state()
-    if current_state == SubscribeStates.waiting_for_password:
+    if current_state:
         await state.clear()
-        await message.answer("❌ Subscription cancelled.")
+        await message.answer("❌ Input cancelled.")
     else:
         await message.answer("ℹ️ Nothing to cancel.")
 
