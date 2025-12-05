@@ -248,9 +248,7 @@ Enter your timezone in this format (tap to copy):
 
 👉 You can find your exact timezone here: https://en.wikipedia.org/wiki/List_of_tz_database_time_zones
 
-If you don’t set one, the bot will use UTC (London time, no DST).
-
-Just copy your city and send it!""",
+If you don’t set one, the bot will use UTC (London time, no DST).""",
 parse_mode="HTML")
     
 def is_valid_timezone(tz_name: str) -> bool:
