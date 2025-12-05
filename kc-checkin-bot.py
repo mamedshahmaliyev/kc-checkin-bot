@@ -156,10 +156,10 @@ def my_info(message: Message) -> str:
 @dp.message(Command("start"))
 async def command_start_handler(message: Message) -> None:
     await message.answer("""
-Hello! I'm KC Checkin Bot. 
+Hello! ⏱️ I'm <b>KC Checkin Bot</b>. 
 I can remind you to clock in and out for the day and lunch.
 
-Use /subscribe to subscribe to reminders.
+Use /subscribe to subscribe for reminders.
 Use /my_info to show your current info.
 
 Use /set_daily_schedule to set your daily schedule for a weekday.
