@@ -61,6 +61,13 @@ from aiogram.fsm.storage.memory import MemoryStorage
 
 import calendar
 
+action_to_icon = {
+   "dayin": "➡️🚪",
+   "lunchout": "➡️🍽️",
+   "lunchin": "↩️🍽️",
+   "dayout": "🔚🚪",
+}
+
 # Define FSM states for subscription
 class SubscribeStates(StatesGroup):
     waiting_for_password = State()
@@ -98,7 +105,22 @@ def subscribe(message: Message):
             'username': message.from_user.username,
             'first_name': message.from_user.first_name,
             'last_name': message.from_user.last_name,
-            'log': {}
+            "log": {
+                "dayin": "",
+                "lunchout": "",
+                "lunchin": "",
+                "dayout": ""
+            },
+            "timezone": "UTC",
+            "weekly_schedule": [
+                "N/A",
+                "N/A",
+                "N/A",
+                "N/A",
+                "N/A",
+                "N/A",
+                "N/A"
+            ]
         }, open(f'subscribers/{message.from_user.id}.json', "w"), indent=2, ensure_ascii=False)
         
 def subscriber(message: Message) -> dict:
@@ -122,7 +144,7 @@ def my_info(message: Message) -> str:
     # msg += f"👤 <b>{message.from_user.full_name}</b>\n\n"
     msg += f"⏱️ Log for <code>{datetime.now(ZoneInfo(s.get('timezone', 'UTC'))).strftime('%Y-%m-%d, %a')}</code>:\n"
     for k, v in s['log'].items():
-        msg += f"  {k.upper()} - <code>{datetime.fromisoformat(v).astimezone(ZoneInfo(s.get('timezone', 'UTC'))).strftime('%H:%M:%S')}</code>\n" if v and datetime.fromisoformat(v).astimezone(ZoneInfo(s.get('timezone', 'UTC'))).strftime('%Y-%m-%d') == datetime.now(ZoneInfo(s.get('timezone', 'UTC'))).strftime('%Y-%m-%d') else f"  {k.upper()} -\n"
+        msg += f"  {action_to_icon[k.lower()]} {k.upper()} - <code>{datetime.fromisoformat(v).astimezone(ZoneInfo(s.get('timezone', 'UTC'))).strftime('%H:%M:%S')}</code>\n" if v and datetime.fromisoformat(v).astimezone(ZoneInfo(s.get('timezone', 'UTC'))).strftime('%Y-%m-%d') == datetime.now(ZoneInfo(s.get('timezone', 'UTC'))).strftime('%Y-%m-%d') else f"  {action_to_icon[k.lower()]} {k.upper()} -\n"
     msg += f"\n📅 Weekly Schedule:\n"
     msg += "[week_day,day_in,lunch_out,day_out]\n"
     for i, v in enumerate(s.get('weekly_schedule', ['N/A']*7)):
@@ -148,6 +170,17 @@ Checkout menu for more commands.
 ⚠️ Important: Clocking in/out in this Telegram bot does NOT register in Bamboo HR.
 Please remember to also clock in/out in Bamboo HR itself!
 """.strip())
+    
+    
+@dp.message(Command("cancel"))
+async def command_cancel_handler(message: Message, state: FSMContext) -> None:
+    current_state = await state.get_state()
+    print(current_state, flush=True)
+    if current_state:
+        await state.clear()
+        await message.answer("❌ Input cancelled.")
+    else:
+        await message.answer("ℹ️ Nothing to cancel.")
     
 @dp.message(Command("dayin", "dayout", "lunchin", "lunchout", "log"))
 async def command_action_handler(message: Message, command: CommandObject) -> None:
@@ -319,14 +352,7 @@ async def command_unsubscribe_handler(message: Message) -> None:
     else:
         await message.answer("❌ You're not subscribed! Please subscribe first.")
 
-@dp.message(Command("cancel"))
-async def command_cancel_handler(message: Message, state: FSMContext) -> None:
-    current_state = await state.get_state()
-    if current_state:
-        await state.clear()
-        await message.answer("❌ Input cancelled.")
-    else:
-        await message.answer("ℹ️ Nothing to cancel.")
+
 
 @dp.message(SubscribeStates.waiting_for_password)
 async def process_password_handler(message: Message, state: FSMContext) -> None:
@@ -353,27 +379,27 @@ async def check_reminders_loop():
         for f in os.listdir('subscribers'):
             if f.endswith('.json'):
                 s = json.load(open(f'subscribers/{f}'))
-                n = datetime.now(timezone.utc)
-                if n.weekday() >= 5:
-                    continue
+                n = datetime.now(ZoneInfo(s.get('timezone', 'UTC')))
+                week_day = n.isoweekday()
+                past = n - timedelta(hours=48)
                 ymd, hm =  n.strftime('%Y-%m-%d'), n.strftime('%H:%M')
+                schedule = [a for a in s.get('weekly_schedule', []) if a and a.split(',')[0] == str(week_day)]
+                if not schedule:
+                    continue
+                target_day_in, target_lunch_out, target_day_out = schedule[0].split(',')[1:]
                 log = s.get('log', {})
-                dayin = datetime.fromisoformat(log.get('dayin', "2000-12-01T07:15:37.133310+00:00"))
-                has_dayin = dayin.strftime('%Y-%m-%d') == ymd
-                lunchout = datetime.fromisoformat(log.get('lunchout', "2000-12-01T07:15:37.133310+00:00"))
-                has_lunchout = lunchout.strftime('%Y-%m-%d') == ymd
-                lunchin = datetime.fromisoformat(log.get('lunchin', "2000-12-01T07:15:37.133310+00:00"))
-                has_lunchin = lunchin.strftime('%Y-%m-%d') == ymd
-                dayout = datetime.fromisoformat(log.get('dayout', "2000-12-01T07:15:37.133310+00:00"))
-                has_dayout = dayout.strftime('%Y-%m-%d') == ymd
-                if not has_dayin and hm >= '05:00':
-                    await bot.send_message(s['id'], "Reminder: ➡️🚪 Day IN!")
-                if has_dayin and not has_lunchout and hm >= '11:00':
-                    await bot.send_message(s['id'], "Reminder: ➡️🍽️ Lunch OUT!")
+                has_dayin = datetime.fromisoformat(log.get('dayin', past.isoformat())).astimezone(ZoneInfo(s.get('timezone', 'UTC'))).strftime('%Y-%m-%d') == ymd
+                has_lunchout = (lunchout :=datetime.fromisoformat(log.get('lunchout', past.isoformat()))).astimezone(ZoneInfo(s.get('timezone', 'UTC'))).strftime('%Y-%m-%d') == ymd
+                has_lunchin = datetime.fromisoformat(log.get('lunchin', past.isoformat())).astimezone(ZoneInfo(s.get('timezone', 'UTC'))).strftime('%Y-%m-%d') == ymd
+                has_dayout = datetime.fromisoformat(log.get('dayout', past.isoformat())).astimezone(ZoneInfo(s.get('timezone', 'UTC'))).strftime('%Y-%m-%d') == ymd
+                if not has_dayin and hm >= target_day_in.strip().lower():
+                    await bot.send_message(s['id'], f"Reminder: {action_to_icon['dayin']} Day IN!")
+                if has_dayin and not has_lunchout and hm >= target_lunch_out.strip().lower():
+                    await bot.send_message(s['id'], f"Reminder: {action_to_icon['lunchout']} Lunch OUT!")
                 if has_dayin and has_lunchout and not has_lunchin and lunchout + timedelta(hours=1) <= n:
-                    await bot.send_message(s['id'], "Reminder: ↩️🍽️ Lunch IN!")
-                if has_dayin and has_lunchin and has_lunchout and not has_dayout and hm >= '16:30':
-                    await bot.send_message(s['id'], "Reminder: 🔚🚪 Day OUT!")
+                    await bot.send_message(s['id'], f"Reminder: {action_to_icon['lunchin']} Lunch IN!")
+                if has_dayin and has_lunchin and has_lunchout and not has_dayout and hm >= target_day_out.strip().lower():
+                    await bot.send_message(s['id'], f"Reminder: {action_to_icon['dayout']} Day OUT!")
         await asyncio.sleep(60*5)
 
 async def main() -> None:
