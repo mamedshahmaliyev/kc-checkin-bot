@@ -3,3 +3,4 @@ compose.override.yml
 logs
 subscribers
 .env
+tmp.py

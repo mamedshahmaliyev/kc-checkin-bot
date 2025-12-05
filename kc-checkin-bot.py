@@ -156,20 +156,24 @@ def my_info(message: Message) -> str:
 @dp.message(Command("start"))
 async def command_start_handler(message: Message) -> None:
     await message.answer("""
-Hello! ⏱️ I'm <b>KC Checkin Bot</b>. 
+Hello! 
+
+⏱️ I'm <b>KC Checkin Bot</b>. 
 I can remind you to clock in and out for the day and lunch.
 
 Use /subscribe to subscribe for reminders.
+
+Use /set_timezone to set your timezone, default is UTC.
+Use /set_daily_schedule to set your daily schedule for a weekday.
+
 Use /my_info to show your current info.
 
-Use /set_daily_schedule to set your daily schedule for a weekday.
-Use /set_timezone to set your timezone, default is UTC.
+Checkout ≡ menu for more commands.
 
-Checkout menu for more commands.
-
-⚠️ Important: Clocking in/out in this Telegram bot does NOT register in Bamboo HR.
+⚠️ Important:
+Clocking in/out in this Telegram bot does NOT register in Bamboo HR.
 Please remember to also clock in/out in Bamboo HR itself!
-""".strip())
+""".strip(), parse_mode="HTML")
     
     
 @dp.message(Command("cancel"))
