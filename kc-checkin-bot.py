@@ -140,16 +140,7 @@ def log_action(message: Message, action: str):
     json.dump(s, open(f'subscribers/{message.from_user.id}.json', "w"), indent=2, ensure_ascii=False)
     return subscriber(message)
 
-def reset_actions(message: Message):
-    s = subscriber(message)
-    s['log'] = {
-        "dayin": "2000-01-01T09:00:00+00:00",
-        "lunchout": "2000-01-01T13:00:00+00:00",
-        "lunchin": "2000-01-01T14:00:00+00:00",
-        "dayout": "2000-01-01T20:30:00+00:00"
-    }
-    json.dump(s, open(f'subscribers/{message.from_user.id}.json', "w"), indent=2, ensure_ascii=False)
-    return subscriber(message)
+
 
 def my_info(message: Message) -> str:
     s = subscriber(message)
@@ -213,9 +204,23 @@ async def command_action_handler(message: Message, command: CommandObject) -> No
     if cmd in ["dayin", "dayout", "lunchin", "lunchout"]:
         if datetime.fromisoformat(s.get('log', {}).get(cmd, '2000-01-01T09:00:00+00:00')).astimezone(ZoneInfo(s['timezone'])).strftime('%Y-%m-%d') == datetime.now(ZoneInfo(s['timezone'])).strftime('%Y-%m-%d'):
             await message.answer(f"ℹ️ ✅ You've already clocked {cmd.upper()} today at <code>{datetime.fromisoformat(s.get('log', {}).get(cmd, '2000-01-01T09:00:00+00:00')).astimezone(ZoneInfo(s['timezone'])).strftime('%H:%M:%S')}</code>.", parse_mode='HTML')
+            await message.answer(f"⚠️ Don't forget to do the same in <b>Bamboo HR</b>!", parse_mode='HTML')
             return
         log_action(message, cmd)
-        await message.answer(f"✅ {cmd.upper()} logged!")
+        await message.answer(f"✅ {cmd.upper()} logged!\n\n ⚠️ Don't forget to do the same in <b>Bamboo HR</b>!", parse_mode='HTML')
+    await message.answer(f"{my_info(message)}", parse_mode='HTML')
+    
+@dp.message(Command("reset_day"))
+async def command_reset_day_handler(message: Message) -> None:
+    s = subscriber(message)
+    s['log'] = {
+        "dayin": "2000-01-01T09:00:00+00:00",
+        "lunchout": "2000-01-01T13:00:00+00:00",
+        "lunchin": "2000-01-01T14:00:00+00:00",
+        "dayout": "2000-01-01T20:30:00+00:00"
+    }
+    json.dump(s, open(f'subscribers/{message.from_user.id}.json', "w"), indent=2, ensure_ascii=False)
+    await message.answer(f"✅ Daily log reseted!")
     await message.answer(f"{my_info(message)}", parse_mode='HTML')
     
 @dp.message(Command("my_info"))
