@@ -54,7 +54,7 @@ from dataclasses import dataclass, fields, asdict
 
 from aiogram import Bot, Dispatcher
 from aiogram.filters import Command, CommandObject
-from aiogram.types import Message, BotCommand
+from aiogram.types import Message, BotCommand, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
@@ -67,6 +67,14 @@ action_to_icon = {
    "lunchin": "↩️🍽️",
    "dayout": "🔚🚪",
 }
+
+def create_action_keyboard(action: str) -> InlineKeyboardMarkup:
+    """Create an inline keyboard with a button for the specified action"""
+    button_text = f"{action_to_icon.get(action, '')} {action.upper().replace('IN', ' IN').replace('OUT', ' OUT')}"
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text=button_text, callback_data=f"action_{action}")
+    ]])
+    return keyboard
 
 # Define FSM states for subscription
 class SubscribeStates(StatesGroup):
@@ -140,6 +148,10 @@ def reset_actions(message: Message):
 
 def my_info(message: Message) -> str:
     s = subscriber(message)
+    return my_info_from_user_id(message.from_user.id)
+
+def my_info_from_user_id(user_id: int) -> str:
+    s = json.load(open(f'subscribers/{user_id}.json'))
     msg = ""
     # msg += f"👤 <b>{message.from_user.full_name}</b>\n\n"
     msg += f"⏱️ Log for <code>{datetime.now(ZoneInfo(s.get('timezone', 'UTC'))).strftime('%Y-%m-%d, %a')}</code>:\n"
@@ -354,6 +366,28 @@ async def command_unsubscribe_handler(message: Message) -> None:
     else:
         await message.answer("❌ You're not subscribed! Please subscribe first.")
 
+@dp.callback_query(lambda c: c.data and c.data.startswith("action_"))
+async def callback_action_handler(callback: CallbackQuery) -> None:
+    """Handle inline button clicks for actions"""
+    user_id = callback.from_user.id
+    if not os.path.exists(f'subscribers/{user_id}.json'):
+        await callback.answer("❌ You're not subscribed! Please subscribe first.", show_alert=True)
+        return
+    
+    action = callback.data.replace("action_", "")
+    if action in ["dayin", "dayout", "lunchin", "lunchout"]:
+        # Log the action
+        s = json.load(open(f'subscribers/{user_id}.json'))
+        s['log'][action] = datetime.now(timezone.utc).isoformat()
+        json.dump(s, open(f'subscribers/{user_id}.json', "w"), indent=2, ensure_ascii=False)
+        
+        await callback.answer(f"✅ {action.upper().replace('IN', ' IN').replace('OUT', ' OUT')} logged!", show_alert=False)
+        
+        # Send updated info
+        await callback.message.answer(f"{my_info_from_user_id(user_id)}", parse_mode='HTML')
+    else:
+        await callback.answer("❌ Invalid action.", show_alert=True)
+
 
 
 @dp.message(SubscribeStates.waiting_for_password)
@@ -395,13 +429,13 @@ async def check_reminders_loop():
                 has_lunchin = datetime.fromisoformat(log.get('lunchin', past.isoformat())).astimezone(ZoneInfo(s.get('timezone', 'UTC'))).strftime('%Y-%m-%d') == ymd
                 has_dayout = datetime.fromisoformat(log.get('dayout', past.isoformat())).astimezone(ZoneInfo(s.get('timezone', 'UTC'))).strftime('%Y-%m-%d') == ymd
                 if not has_dayin and hm >= target_day_in.strip().lower():
-                    await bot.send_message(s['id'], f"Reminder: {action_to_icon['dayin']} Day IN!")
+                    await bot.send_message(s['id'], f"Reminder: {action_to_icon['dayin']} Day IN!", reply_markup=create_action_keyboard('dayin'))
                 if has_dayin and not has_lunchout and hm >= target_lunch_out.strip().lower():
-                    await bot.send_message(s['id'], f"Reminder: {action_to_icon['lunchout']} Lunch OUT!")
+                    await bot.send_message(s['id'], f"Reminder: {action_to_icon['lunchout']} Lunch OUT!", reply_markup=create_action_keyboard('lunchout'))
                 if has_dayin and has_lunchout and not has_lunchin and lunchout + timedelta(hours=1) <= n:
-                    await bot.send_message(s['id'], f"Reminder: {action_to_icon['lunchin']} Lunch IN!")
+                    await bot.send_message(s['id'], f"Reminder: {action_to_icon['lunchin']} Lunch IN!", reply_markup=create_action_keyboard('lunchin'))
                 if has_dayin and has_lunchin and has_lunchout and not has_dayout and hm >= target_day_out.strip().lower():
-                    await bot.send_message(s['id'], f"Reminder: {action_to_icon['dayout']} Day OUT!")
+                    await bot.send_message(s['id'], f"Reminder: {action_to_icon['dayout']} Day OUT!", reply_markup=create_action_keyboard('dayout'))
         await asyncio.sleep(60*5)
 
 async def main() -> None:
