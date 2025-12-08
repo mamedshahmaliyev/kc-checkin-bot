@@ -114,10 +114,10 @@ def subscribe(message: Message):
             'first_name': message.from_user.first_name,
             'last_name': message.from_user.last_name,
             "log": {
-                "dayin": "",
-                "lunchout": "",
-                "lunchin": "",
-                "dayout": ""
+                "dayin": "2000-01-01T09:00:00+00:00",
+                "lunchout": "2000-01-01T13:00:00+00:00",
+                "lunchin": "2000-01-01T14:00:00+00:00",
+                "dayout": "2000-01-01T20:30:00+00:00"
             },
             "timezone": "UTC",
             "weekly_schedule": [
@@ -142,7 +142,12 @@ def log_action(message: Message, action: str):
 
 def reset_actions(message: Message):
     s = subscriber(message)
-    s['log'] = {}
+    s['log'] = {
+        "dayin": "2000-01-01T09:00:00+00:00",
+        "lunchout": "2000-01-01T13:00:00+00:00",
+        "lunchin": "2000-01-01T14:00:00+00:00",
+        "dayout": "2000-01-01T20:30:00+00:00"
+    }
     json.dump(s, open(f'subscribers/{message.from_user.id}.json', "w"), indent=2, ensure_ascii=False)
     return subscriber(message)
 
@@ -154,14 +159,15 @@ def my_info_from_user_id(user_id: int) -> str:
     s = json.load(open(f'subscribers/{user_id}.json'))
     msg = ""
     # msg += f"👤 <b>{message.from_user.full_name}</b>\n\n"
-    msg += f"⏱️ Log for <code>{datetime.now(ZoneInfo(s.get('timezone', 'UTC'))).strftime('%Y-%m-%d, %a')}</code>:\n"
+    msg += f"⏱️ Log for: <code>{datetime.now(ZoneInfo(s.get('timezone', 'UTC'))).strftime('%Y-%m-%d, %a')}</code>:\n"
     for k, v in s['log'].items():
         msg += f"  {action_to_icon[k.lower()]} {k.upper()} - <code>{datetime.fromisoformat(v).astimezone(ZoneInfo(s.get('timezone', 'UTC'))).strftime('%H:%M:%S')}</code>\n" if v and datetime.fromisoformat(v).astimezone(ZoneInfo(s.get('timezone', 'UTC'))).strftime('%Y-%m-%d') == datetime.now(ZoneInfo(s.get('timezone', 'UTC'))).strftime('%Y-%m-%d') else f"  {action_to_icon[k.lower()]} {k.upper()} -\n"
-    msg += f"\n📅 Weekly Schedule:\n"
+    msg += f"\n📅 Weekly schedule [/set_daily_schedule]:\n"
     msg += "[week_day,day_in,lunch_out,day_out]\n"
     for i, v in enumerate(s.get('weekly_schedule', ['N/A']*7)):
         msg += f"<code>{v}</code> [{calendar.day_abbr[i]}]\n" if v else f"N/A [{calendar.day_abbr[i]}]\n"
     msg += f"\n🌍 Timezone: <code>{s.get('timezone', 'UTC')}</code>\n"
+    msg += f"\nℹ️ Use /my_info to show your info."
     
     return msg.strip()
 
@@ -205,15 +211,11 @@ async def command_action_handler(message: Message, command: CommandObject) -> No
         return
     cmd = command.command
     if cmd in ["dayin", "dayout", "lunchin", "lunchout"]:
+        if datetime.fromisoformat(s.get('log', {}).get(cmd, '2000-01-01T09:00:00+00:00')).astimezone(ZoneInfo(s['timezone'])).strftime('%Y-%m-%d') == datetime.now(ZoneInfo(s['timezone'])).strftime('%Y-%m-%d'):
+            await message.answer(f"ℹ️ ✅ You've already clocked {cmd.upper()} today at <code>{datetime.fromisoformat(s.get('log', {}).get(cmd, '2000-01-01T09:00:00+00:00')).astimezone(ZoneInfo(s['timezone'])).strftime('%H:%M:%S')}</code>.", parse_mode='HTML')
+            return
         log_action(message, cmd)
-    await message.answer(f"{my_info(message)}", parse_mode='HTML')
-    
-@dp.message(Command("reset_day"))
-async def command_reset_handler(message: Message) -> None:
-    if not (s := is_subscribed(message)):
-        await message.answer("❌ You're not subscribed! Please subscribe first.")
-        return
-    reset_actions(message)
+        await message.answer(f"✅ {cmd.upper()} logged!")
     await message.answer(f"{my_info(message)}", parse_mode='HTML')
     
 @dp.message(Command("my_info"))
@@ -352,7 +354,7 @@ async def process_daily_schedule_handler(message: Message, state: FSMContext) ->
     arr[week_day - 1] = f"{week_day},{day_in},{lunch_out},{day_out}"
     s['weekly_schedule'] = arr
     json.dump(s, open(f'subscribers/{message.from_user.id}.json', "w"), indent=2, ensure_ascii=False)
-    await message.answer(f"✅ Your updated weekly schedule is:\n{json.dumps(subscriber(message)['weekly_schedule'], indent=2, ensure_ascii=False)}")
+    await message.answer(f"✅ Your updated weekly schedule is:\n{json.dumps(subscriber(message)['weekly_schedule'], indent=2, ensure_ascii=False)}\n\nSet another day with /set_daily_schedule")
     await message.answer(f"{my_info(message)}", parse_mode='HTML')
     
 
