@@ -388,7 +388,7 @@ async def callback_action_handler(callback: CallbackQuery) -> None:
         s['log'][action] = datetime.now(timezone.utc).isoformat()
         json.dump(s, open(f'subscribers/{user_id}.json', "w"), indent=2, ensure_ascii=False)
         
-        await callback.answer(f"✅ {action.upper().replace('IN', ' IN').replace('OUT', ' OUT')} logged!", show_alert=False)
+        await callback.message.answer(f"✅ {action.upper().replace('IN', ' IN').replace('OUT', ' OUT')} logged!", show_alert=False)
         
         # Send updated info
         await callback.message.answer(f"{my_info_from_user_id(user_id)}", parse_mode='HTML')
