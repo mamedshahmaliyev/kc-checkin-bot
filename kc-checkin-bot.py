@@ -392,6 +392,8 @@ async def callback_action_handler(callback: CallbackQuery) -> None:
         
         # Send updated info
         await callback.message.answer(f"{my_info_from_user_id(user_id)}", parse_mode='HTML')
+        
+        await callback.message.answer(f"⚠️ Don't forget to do the same in <b>Bamboo HR</b>!", parse_mode='HTML')
     else:
         await callback.answer("❌ Invalid action.", show_alert=True)
 
