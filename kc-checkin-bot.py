@@ -203,11 +203,14 @@ async def command_action_handler(message: Message, command: CommandObject) -> No
     cmd = command.command
     if cmd in ["dayin", "dayout", "lunchin", "lunchout"]:
         if datetime.fromisoformat(s.get('log', {}).get(cmd, '2000-01-01T09:00:00+00:00')).astimezone(ZoneInfo(s['timezone'])).strftime('%Y-%m-%d') == datetime.now(ZoneInfo(s['timezone'])).strftime('%Y-%m-%d'):
+            await message.answer(f"{my_info(message)}", parse_mode='HTML')
             await message.answer(f"ℹ️ ✅ You've already clocked {cmd.upper()} today at <code>{datetime.fromisoformat(s.get('log', {}).get(cmd, '2000-01-01T09:00:00+00:00')).astimezone(ZoneInfo(s['timezone'])).strftime('%H:%M:%S')}</code>.", parse_mode='HTML')
             await message.answer(f"⚠️ Don't forget to do the same in <b>Bamboo HR</b>!", parse_mode='HTML')
             return
         log_action(message, cmd)
+        await message.answer(f"{my_info(message)}", parse_mode='HTML')
         await message.answer(f"✅ {cmd.upper()} logged!\n\n ⚠️ Don't forget to do the same in <b>Bamboo HR</b>!", parse_mode='HTML')
+        return
     await message.answer(f"{my_info(message)}", parse_mode='HTML')
     
 @dp.message(Command("reset_day"))
@@ -388,10 +391,11 @@ async def callback_action_handler(callback: CallbackQuery) -> None:
         s['log'][action] = datetime.now(timezone.utc).isoformat()
         json.dump(s, open(f'subscribers/{user_id}.json', "w"), indent=2, ensure_ascii=False)
         
-        await callback.message.answer(f"✅ {action.upper().replace('IN', ' IN').replace('OUT', ' OUT')} logged!", show_alert=False)
+        await callback.answer(f"✅ {action.upper().replace('IN', ' IN').replace('OUT', ' OUT')} logged!", show_alert=False)
         
-        # Send updated info
         await callback.message.answer(f"{my_info_from_user_id(user_id)}", parse_mode='HTML')
+        
+        await callback.message.answer(f"✅ {action.upper().replace('IN', ' IN').replace('OUT', ' OUT')} logged!")
         
         await callback.message.answer(f"⚠️ Don't forget to do the same in <b>Bamboo HR</b>!", parse_mode='HTML')
     else:
