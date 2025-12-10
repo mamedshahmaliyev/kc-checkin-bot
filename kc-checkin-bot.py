@@ -81,6 +81,7 @@ class SubscribeStates(StatesGroup):
     waiting_for_password = State()
     waiting_for_daily_schedule = State()
     waiting_for_timezone = State()
+    waiting_for_bamboo_phpsessid = State()
 
 async def on_startup(bot: Bot):
     await bot.set_my_commands([
@@ -89,6 +90,8 @@ async def on_startup(bot: Bot):
         BotCommand(command="lunchin", description="Clock IN for LUNCH"),
         BotCommand(command="dayout", description="Clock OUT for the DAY"),
         BotCommand(command="subscribe", description="Subscribe to get reminders for the day"),
+        BotCommand(command="set_bamboo_phpsessid", description="Set Bamboo HR PHPSESSID"),
+        BotCommand(command="unset_bamboo_phpsessid", description="Unset Bamboo HR PHPSESSID"),
         BotCommand(command="my_info", description="Show your info"),
         BotCommand(command="set_daily_schedule", description="Set your daily schedule for a weekday"),
         BotCommand(command="set_timezone", description="Set your timezone, default is UTC"),
@@ -157,7 +160,11 @@ def my_info_from_user_id(user_id: int) -> str:
     msg += "[week_day,day_in,lunch_out,day_out]\n"
     for i, v in enumerate(s.get('weekly_schedule', ['N/A']*7)):
         msg += f"<code>{v}</code> [{calendar.day_abbr[i]}]\n" if v else f"N/A [{calendar.day_abbr[i]}]\n"
-    msg += f"\n🌍 Timezone: <code>{s.get('timezone', 'UTC')}</code>\n"
+    msg += f"\n🌍 Timezone: <code>{s.get('timezone', 'UTC')}</code>\nUse /set_timezone to update\n"
+    if t := s.get('bamboo_phpsessid'):
+        msg += f"\n🔐 Bamboo HR PHPSESSID: <code>{t[:3]}**{t[-3:]}</code>\nUse /unset_bamboo_phpsessid to unset\n"
+    else:
+        msg += f"\n🔐 Bamboo HR PHPSESSID: N/A\nuse /set_bamboo_phpsessid to set\n"
     msg += f"\nℹ️ Use /my_info to show your info."
     
     return msg.strip()
@@ -259,7 +266,8 @@ async def command_subscribe_handler(message: Message, state: FSMContext) -> None
 @dp.message(Command("set_timezone"))
 async def command_set_timezone_handler(message: Message, state: FSMContext) -> None:
     await state.set_state(SubscribeStates.waiting_for_timezone)
-    await message.answer("""🌍 <b>Please set your timezone</b>
+    await message.answer("""
+🌍 <b>Please set your timezone</b>
 
 Enter your timezone in this format (tap to copy):
 
@@ -270,7 +278,7 @@ Enter your timezone in this format (tap to copy):
 
 👉 You can find your exact timezone here: https://en.wikipedia.org/wiki/List_of_tz_database_time_zones
 
-If you don’t set one, the bot will use UTC (London time, no DST).""",
+If you don’t set one, the bot will use UTC (London time, no DST).""".strip(),
 parse_mode="HTML")
     
 def is_valid_timezone(tz_name: str) -> bool:
@@ -295,6 +303,44 @@ async def process_timezone_handler(message: Message, state: FSMContext) -> None:
     await message.answer(f"✅ Timezone set to {message.text.strip()}")
     await message.answer(f"{my_info(message)}", parse_mode='HTML')
     
+    
+@dp.message(Command("set_bamboo_phpsessid"))
+async def command_set_bamboo_phpsessid_handler(message: Message, state: FSMContext) -> None:
+    await state.set_state(SubscribeStates.waiting_for_bamboo_phpsessid)
+    await message.answer("""
+🔐 Please enter your Bamboo HR <b>PHPSESSID</b>
+Use /cancel to abort.
+
+Login into Bamboo HR and copy the PHPSESSID from the browser cookies:
+<code>CTRL+SHIFT+I (Developer Tools) -> Application -> Cookies -> PHPSESSID</code>
+
+PHPSESSID looks like this:
+<i>mThcCZD%2N5wGtGkCsCNb1h6YIt7ML3lW</i>
+""".strip(), parse_mode="HTML")
+    
+@dp.message(SubscribeStates.waiting_for_bamboo_phpsessid)
+async def process_bamboo_phpsessid_handler(message: Message, state: FSMContext) -> None:
+    await state.clear()
+    s = subscriber(message)
+    if not message.text or not message.text.strip():
+        await message.answer(f"{my_info(message)}", parse_mode='HTML')
+        await message.answer("❌ Action aborted.")
+        return
+    s['bamboo_phpsessid'] = message.text.strip()
+    json.dump(s, open(f'subscribers/{message.from_user.id}.json', "w"), indent=2, ensure_ascii=False)
+    await message.answer(f"{my_info(message)}", parse_mode='HTML')
+    await message.answer(f"✅ Bamboo HR PHPSESSID set successfully!")
+    
+@dp.message(Command("unset_bamboo_phpsessid"))
+async def command_unset_bamboo_phpsessid_handler(message: Message, state: FSMContext) -> None:
+    await state.clear()
+    s = subscriber(message)
+    s['bamboo_phpsessid'] = None
+    json.dump(s, open(f'subscribers/{message.from_user.id}.json', "w"), indent=2, ensure_ascii=False)
+    await message.answer(f"{my_info(message)}", parse_mode='HTML')
+    await message.answer(f"✅ Bamboo HR PHPSESSID unset successfully!")
+    
+
 @dp.message(Command("set_daily_schedule"))
 async def command_set_daily_schedule_handler(message: Message, state: FSMContext) -> None:
     await state.set_state(SubscribeStates.waiting_for_daily_schedule)
