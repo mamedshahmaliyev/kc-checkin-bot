@@ -155,7 +155,7 @@ def my_info_from_user_id(user_id: int) -> str:
     s = json.load(open(f'subscribers/{user_id}.json'))
     msg = ""
     # msg += f"👤 <b>{message.from_user.full_name}</b>\n\n"
-    msg += f"⏱️ Log for: <code>{datetime.now(ZoneInfo(timezone := s.get('timezone', 'UTC'))).strftime('%Y-%m-%d, %a')}</code>:\n"
+    msg += f"⏱️ Daily Log for: {datetime.now(ZoneInfo(timezone := s.get('timezone', 'UTC'))).strftime('%Y-%m-%d, %a')}:\n"
     for k, v in s['log'].items():
         msg += f"  {action_to_icon[k.lower()]} {k.upper().replace('IN', ' IN').replace('OUT', ' OUT')} - <code>{datetime.fromisoformat(v).astimezone(ZoneInfo(timezone)).strftime('%H:%M:%S')}</code>\n" if v and datetime.fromisoformat(v).astimezone(ZoneInfo(timezone)).strftime('%Y-%m-%d') == datetime.now(ZoneInfo(timezone)).strftime('%Y-%m-%d') else f"  {action_to_icon[k.lower()]} {k.upper().replace('IN', ' IN').replace('OUT', ' OUT')} -\n"
     msg += f"\n📅 Weekly schedule [/set_daily_schedule]:\n"
@@ -164,8 +164,10 @@ def my_info_from_user_id(user_id: int) -> str:
         msg += f"<code>{v}</code> [{calendar.day_abbr[i]}]\n" if v else f"N/A [{calendar.day_abbr[i]}]\n"
     msg += f"\n🌍 Timezone: <code>{timezone}</code>\nUse /set_timezone to update\n"
     if t := s.get('bamboo_phpsessid'):
-        msg += f"\n🔐 Bamboo HR PHPSESSID: <code>{t[:3]}**{t[-3:]}</code>\nUse /unset_bamboo_phpsessid to unset\n"
+        msg += f"\n🔐 Bamboo HR PHPSESSID:\n<code>{t[:5]}**{t[-5:]}</code>\nUse /unset_bamboo_phpsessid to unset\nUse /set_bamboo_phpsessid to update\n"
         msg += f"\nBamboo HR Log:\n"
+        if err := s.get('bamboo_status', {}).get('error'):
+            msg += f" ❗{err}\n"
         for log in s.get('bamboo_status', {}).get('clockEntries', []):
             msg += f"  {log.get('start').split(' ')[1]} -> {log.get('end').split(' ')[1] if log.get('end') else 'now'}, {date_diff_in_hhmm(log.get('start'), log.get('end') or datetime.now(ZoneInfo(timezone)).strftime('%Y-%m-%d %H:%M:%S'))}\n"
     else:
