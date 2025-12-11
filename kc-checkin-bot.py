@@ -1,4 +1,4 @@
-import os, dotenv
+import os, dotenv, requests, re
 from zoneinfo import ZoneInfo
 dotenv.load_dotenv(override=True)
 
@@ -137,32 +137,37 @@ def subscribe(message: Message):
 def subscriber(message: Message) -> dict:
     return json.load(open(f'subscribers/{message.from_user.id}.json'))
 
-def log_action(message: Message, action: str):
-    s = subscriber(message)
-    s['log'][action] = datetime.now(timezone.utc).isoformat()
-    json.dump(s, open(f'subscribers/{message.from_user.id}.json', "w"), indent=2, ensure_ascii=False)
-    return subscriber(message)
-
-
-
 def my_info(message: Message) -> str:
     s = subscriber(message)
     return my_info_from_user_id(message.from_user.id)
+
+def date_diff_in_hhmm(date1_str: str, date2_str: str) -> str:
+    fmt = '%Y-%m-%d %H:%M:%S'
+    delta = abs(datetime.strptime(date2_str, fmt) - datetime.strptime(date1_str, fmt))
+    
+    total_minutes = int(delta.total_seconds() // 60)
+    hours = total_minutes // 60
+    minutes = total_minutes % 60
+    
+    return f"{hours:02d}h:{minutes:02d}m"
 
 def my_info_from_user_id(user_id: int) -> str:
     s = json.load(open(f'subscribers/{user_id}.json'))
     msg = ""
     # msg += f"👤 <b>{message.from_user.full_name}</b>\n\n"
-    msg += f"⏱️ Log for: <code>{datetime.now(ZoneInfo(s.get('timezone', 'UTC'))).strftime('%Y-%m-%d, %a')}</code>:\n"
+    msg += f"⏱️ Log for: <code>{datetime.now(ZoneInfo(timezone := s.get('timezone', 'UTC'))).strftime('%Y-%m-%d, %a')}</code>:\n"
     for k, v in s['log'].items():
-        msg += f"  {action_to_icon[k.lower()]} {k.upper()} - <code>{datetime.fromisoformat(v).astimezone(ZoneInfo(s.get('timezone', 'UTC'))).strftime('%H:%M:%S')}</code>\n" if v and datetime.fromisoformat(v).astimezone(ZoneInfo(s.get('timezone', 'UTC'))).strftime('%Y-%m-%d') == datetime.now(ZoneInfo(s.get('timezone', 'UTC'))).strftime('%Y-%m-%d') else f"  {action_to_icon[k.lower()]} {k.upper()} -\n"
+        msg += f"  {action_to_icon[k.lower()]} {k.upper().replace('IN', ' IN').replace('OUT', ' OUT')} - <code>{datetime.fromisoformat(v).astimezone(ZoneInfo(timezone)).strftime('%H:%M:%S')}</code>\n" if v and datetime.fromisoformat(v).astimezone(ZoneInfo(timezone)).strftime('%Y-%m-%d') == datetime.now(ZoneInfo(timezone)).strftime('%Y-%m-%d') else f"  {action_to_icon[k.lower()]} {k.upper().replace('IN', ' IN').replace('OUT', ' OUT')} -\n"
     msg += f"\n📅 Weekly schedule [/set_daily_schedule]:\n"
     msg += "[week_day,day_in,lunch_out,day_out]\n"
     for i, v in enumerate(s.get('weekly_schedule', ['N/A']*7)):
         msg += f"<code>{v}</code> [{calendar.day_abbr[i]}]\n" if v else f"N/A [{calendar.day_abbr[i]}]\n"
-    msg += f"\n🌍 Timezone: <code>{s.get('timezone', 'UTC')}</code>\nUse /set_timezone to update\n"
+    msg += f"\n🌍 Timezone: <code>{timezone}</code>\nUse /set_timezone to update\n"
     if t := s.get('bamboo_phpsessid'):
         msg += f"\n🔐 Bamboo HR PHPSESSID: <code>{t[:3]}**{t[-3:]}</code>\nUse /unset_bamboo_phpsessid to unset\n"
+        msg += f"\nBamboo HR Log:\n"
+        for log in s.get('bamboo_status', {}).get('clockEntries', []):
+            msg += f"  {log.get('start').split(' ')[1]} -> {log.get('end').split(' ')[1] if log.get('end') else 'now'}, {date_diff_in_hhmm(log.get('start'), log.get('end') or datetime.now(ZoneInfo(timezone)).strftime('%Y-%m-%d %H:%M:%S'))}\n"
     else:
         msg += f"\n🔐 Bamboo HR PHPSESSID: N/A\nuse /set_bamboo_phpsessid to set\n"
     msg += f"\nℹ️ Use /my_info to show your info."
@@ -202,21 +207,88 @@ async def command_cancel_handler(message: Message, state: FSMContext) -> None:
     else:
         await message.answer("ℹ️ Nothing to cancel.")
     
+    
+    
+def update_bamboo_status(user: dict):
+    if t := user.get('bamboo_phpsessid'):
+        s = requests.Session()
+        s.cookies.update({"PHPSESSID": t})
+        r = s.get("https://knowledgecity.bamboohr.com/widget/timeTracking")
+        try:
+            user['bamboo_status'] = r.json()
+        except:
+            user['bamboo_status'] = {'error': 'PHPSESSID is invalid/expired'}
+        json.dump(user, open(f'subscribers/{user['id']}.json', "w"), indent=2, ensure_ascii=False)
+        
+        
+    
+def bamboo_clock_in_out(user: dict, action: str) -> bool:
+    if t := user.get('bamboo_phpsessid'):
+        s = requests.Session()
+        s.cookies.update({"PHPSESSID": t})
+        csrf_token = re.search(r'var\s+CSRF_TOKEN\s*=\s*"([a-f0-9]{128})"', s.get("https://knowledgecity.bamboohr.com/home").text).group(1)
+        in_out = "in" if action.lower().endswith("in") else "out"
+        employee_id = user.get('bamboo_status', {}).get('employeeId')
+        r = s.post(f"https://knowledgecity.bamboohr.com/timesheet/clock/{in_out}/{employee_id}", headers={"x-csrf-token": csrf_token})
+        update_bamboo_status(user)
+        return r.status_code == 200
+    return True
+        
+        
+@dp.callback_query(lambda c: c.data and c.data.startswith("action_"))
+async def callback_action_handler(callback: CallbackQuery) -> None:
+    """Handle inline button clicks for actions"""
+    user_id = callback.from_user.id
+    if not (s := is_subscribed(callback.message)):
+        await message.answer("❌ You're not subscribed! Please subscribe first.")
+        return
+    
+    action = callback.data.replace("action_", "")
+    if action in ["dayin", "dayout", "lunchin", "lunchout"]:
+        
+        if not bamboo_clock_in_out(s, action):
+            await message.answer(f"{my_info(message)}", parse_mode='HTML')
+            await message.answer("❌ Failed to clock in/out in Bamboo HR. Check Bamboo HR Log in /my_info.", parse_mode='HTML')
+            return
+        
+        s = json.load(open(f'subscribers/{user_id}.json'))
+        s['log'][action] = datetime.now(timezone.utc).isoformat()
+        json.dump(s, open(f'subscribers/{user_id}.json', "w"), indent=2, ensure_ascii=False)
+        
+        await callback.answer(f"✅ {action.upper().replace('IN', ' IN').replace('OUT', ' OUT')} logged!", show_alert=False)
+        
+        message = callback.message
+        await message.answer(f"{my_info(message)}", parse_mode='HTML')
+        await message.answer(f"✅ {action.upper().replace('IN', ' IN').replace('OUT', ' OUT')} successfully logged!", parse_mode='HTML')
+        if not s.get('bamboo_phpsessid'):
+            await message.answer(f"⚠️ Don't forget to do the same in <b>Bamboo HR</b>!", parse_mode='HTML')
+    else:
+        await callback.answer("❌ Invalid action.", show_alert=True)
+        
 @dp.message(Command("dayin", "dayout", "lunchin", "lunchout", "log"))
 async def command_action_handler(message: Message, command: CommandObject) -> None:
     if not (s := is_subscribed(message)):
         await message.answer("❌ You're not subscribed! Please subscribe first.")
         return
+    user_id = message.from_user.id
     cmd = command.command
     if cmd in ["dayin", "dayout", "lunchin", "lunchout"]:
-        if datetime.fromisoformat(s.get('log', {}).get(cmd, '2000-01-01T09:00:00+00:00')).astimezone(ZoneInfo(s['timezone'])).strftime('%Y-%m-%d') == datetime.now(ZoneInfo(s['timezone'])).strftime('%Y-%m-%d'):
+        # if datetime.fromisoformat(s.get('log', {}).get(cmd, '2000-01-01T09:00:00+00:00')).astimezone(ZoneInfo(s['timezone'])).strftime('%Y-%m-%d') == datetime.now(ZoneInfo(s['timezone'])).strftime('%Y-%m-%d'):
+        #     await message.answer(f"{my_info(message)}", parse_mode='HTML')
+        #     await message.answer(f"ℹ️ ✅ You've already clocked {cmd.upper()} today at <code>{datetime.fromisoformat(s.get('log', {}).get(cmd, '2000-01-01T09:00:00+00:00')).astimezone(ZoneInfo(s['timezone'])).strftime('%H:%M:%S')}</code>.", parse_mode='HTML')
+        #     await message.answer(f"⚠️ Don't forget to do the same in <b>Bamboo HR</b>!", parse_mode='HTML')
+        #     return
+        if not bamboo_clock_in_out(s, cmd):
             await message.answer(f"{my_info(message)}", parse_mode='HTML')
-            await message.answer(f"ℹ️ ✅ You've already clocked {cmd.upper()} today at <code>{datetime.fromisoformat(s.get('log', {}).get(cmd, '2000-01-01T09:00:00+00:00')).astimezone(ZoneInfo(s['timezone'])).strftime('%H:%M:%S')}</code>.", parse_mode='HTML')
-            await message.answer(f"⚠️ Don't forget to do the same in <b>Bamboo HR</b>!", parse_mode='HTML')
+            await message.answer("❌ Failed to clock in/out in Bamboo HR. Check Bamboo HR Log in /my_info.", parse_mode='HTML')
             return
-        log_action(message, cmd)
+        s = json.load(open(f'subscribers/{user_id}.json'))
+        s['log'][cmd] = datetime.now(timezone.utc).isoformat()
+        json.dump(s, open(f'subscribers/{user_id}.json', "w"), indent=2, ensure_ascii=False)
         await message.answer(f"{my_info(message)}", parse_mode='HTML')
-        await message.answer(f"✅ {cmd.upper()} logged!\n\n ⚠️ Don't forget to do the same in <b>Bamboo HR</b>!", parse_mode='HTML')
+        await message.answer(f"✅ {cmd.upper().replace('IN', ' IN').replace('OUT', ' OUT')} successfully logged!", parse_mode='HTML')
+        if not s.get('bamboo_phpsessid'):
+            await message.answer(f"⚠️ Don't forget to do the same in <b>Bamboo HR</b>!", parse_mode='HTML')
         return
     await message.answer(f"{my_info(message)}", parse_mode='HTML')
     
@@ -422,30 +494,7 @@ async def command_unsubscribe_handler(message: Message) -> None:
     else:
         await message.answer("❌ You're not subscribed! Please subscribe first.")
 
-@dp.callback_query(lambda c: c.data and c.data.startswith("action_"))
-async def callback_action_handler(callback: CallbackQuery) -> None:
-    """Handle inline button clicks for actions"""
-    user_id = callback.from_user.id
-    if not os.path.exists(f'subscribers/{user_id}.json'):
-        await callback.answer("❌ You're not subscribed! Please subscribe first.", show_alert=True)
-        return
-    
-    action = callback.data.replace("action_", "")
-    if action in ["dayin", "dayout", "lunchin", "lunchout"]:
-        # Log the action
-        s = json.load(open(f'subscribers/{user_id}.json'))
-        s['log'][action] = datetime.now(timezone.utc).isoformat()
-        json.dump(s, open(f'subscribers/{user_id}.json', "w"), indent=2, ensure_ascii=False)
-        
-        await callback.answer(f"✅ {action.upper().replace('IN', ' IN').replace('OUT', ' OUT')} logged!", show_alert=False)
-        
-        await callback.message.answer(f"{my_info_from_user_id(user_id)}", parse_mode='HTML')
-        
-        await callback.message.answer(f"✅ {action.upper().replace('IN', ' IN').replace('OUT', ' OUT')} logged!")
-        
-        await callback.message.answer(f"⚠️ Don't forget to do the same in <b>Bamboo HR</b>!", parse_mode='HTML')
-    else:
-        await callback.answer("❌ Invalid action.", show_alert=True)
+
 
 
 
@@ -469,11 +518,14 @@ async def process_password_handler(message: Message, state: FSMContext) -> None:
             
 bot = Bot(token=os.getenv("BOT_TOKEN"))
 
+
+
 async def check_reminders_loop():
     while True:
         for f in os.listdir('subscribers'):
             if f.endswith('.json'):
                 s = json.load(open(f'subscribers/{f}'))
+                update_bamboo_status(s)
                 n = datetime.now(ZoneInfo(s.get('timezone', 'UTC')))
                 week_day = n.isoweekday()
                 past = n - timedelta(hours=48)
