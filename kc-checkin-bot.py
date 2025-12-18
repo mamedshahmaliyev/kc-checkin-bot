@@ -2,6 +2,8 @@ import os, dotenv, requests, re, traceback
 from zoneinfo import ZoneInfo
 dotenv.load_dotenv(override=True)
 
+from aiogram.exceptions import TelegramForbiddenError
+
 from logging import Logger
 import logging.config, atexit
 
@@ -552,6 +554,10 @@ async def check_reminders_loop():
                         if last_reminder_messages.get(f"{s['id']}") and last_reminder_messages[f"{s['id']}"].get('action') == action:
                             await bot.delete_message(s['id'], last_reminder_messages[f"{s['id']}"].get('id'))
                         last_reminder_messages[f"{s['id']}"] = {'id': message.message_id, 'action': action}
+                except TelegramForbiddenError as e:
+                    if os.path.exists(f'subscribers/{s['id']}.json'):
+                        os.remove(f'subscribers/{s['id']}.json')
+                        logger.error(f"Unsubscribed user due to blocking the bot {f}: {e}. {s}")
                 except Exception as e:
                     traceback.print_exc()
                     logger.error(f"Error checking reminders for {f}: {e}. {s}")
