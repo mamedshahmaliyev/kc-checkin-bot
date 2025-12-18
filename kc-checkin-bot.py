@@ -1,4 +1,4 @@
-import os, dotenv, requests, re
+import os, dotenv, requests, re, traceback
 from zoneinfo import ZoneInfo
 dotenv.load_dotenv(override=True)
 
@@ -50,7 +50,6 @@ if queueHandler := logging.getHandlerByName('queue_handler'):
 
 import asyncio, json
 from datetime import datetime, timezone, timedelta
-from dataclasses import dataclass, fields, asdict
 
 from aiogram import Bot, Dispatcher
 from aiogram.filters import Command, CommandObject
@@ -104,13 +103,13 @@ async def on_startup(bot: Bot):
 dp = Dispatcher(storage=MemoryStorage())
 
 os.makedirs('subscribers', exist_ok=True)
-def is_subscribed(message: Message) -> dict | None:
-    if os.path.exists(f'subscribers/{message.from_user.id}.json'):
-        return json.load(open(f'subscribers/{message.from_user.id}.json'))
+def is_subscribed(user_id) -> dict | None:
+    if os.path.exists(f'subscribers/{user_id}.json'):
+        return json.load(open(f'subscribers/{user_id}.json'))
     return None
 
 def subscribe(message: Message):
-    if not is_subscribed(message):
+    if not is_subscribed(user_id := message.from_user.id):
         json.dump({
             'id': message.from_user.id,
             'username': message.from_user.username,
@@ -134,12 +133,12 @@ def subscribe(message: Message):
             ]
         }, open(f'subscribers/{message.from_user.id}.json', "w"), indent=2, ensure_ascii=False)
         
-def subscriber(message: Message) -> dict:
-    return json.load(open(f'subscribers/{message.from_user.id}.json'))
+def subscriber(user_id) -> dict:
+    return json.load(open(f'subscribers/{user_id}.json'))
 
-def my_info(message: Message) -> str:
-    s = subscriber(message)
-    return my_info_from_user_id(message.from_user.id)
+def my_info(user_id) -> str:
+    s = subscriber(user_id)
+    return my_info_from_user_id(user_id)
 
 def date_diff_in_hhmm(date1_str: str, date2_str: str) -> str:
     fmt = '%Y-%m-%d %H:%M:%S'
@@ -179,25 +178,27 @@ def my_info_from_user_id(user_id: int) -> str:
 @dp.message(Command("start"))
 async def command_start_handler(message: Message) -> None:
     await message.answer("""
-Hello! 
+                    Hello! 
 
-⏱️ I'm <b>KC Checkin Bot</b>. 
-I can remind you to clock in and out for the day and lunch.
+                    ⏱️ I'm <b>KC Checkin Bot</b>. 
+                    I can remind you to clock in and out for the day and lunch.
 
-Use /subscribe to subscribe for reminders.
+                    Use /subscribe and enter password to subscribe for reminders.
 
-Use /set_timezone to set your timezone, default is UTC.
-Use /set_daily_schedule to set your daily schedule for a weekday.
+                    Use /set_timezone to set your timezone, default is UTC.
+                    Use /set_daily_schedule to set your daily schedule for a weekday.
+                    Use /set_bamboo_phpsessid to set your Bamboo HR PHPSESSID.
 
-Use /my_info to show your current info.
+                    Use /my_info to show your current info.
 
-Checkout ≡ menu for more commands.
+                    Checkout ≡ menu for more commands.
 
-⚠️ Important:
-Clocking in/out in this Telegram bot does NOT register in Bamboo HR.
-Please remember to also clock in/out in Bamboo HR itself!
-""".strip(), parse_mode="HTML")
-    
+                    ⚠️ Important:
+                    Clocking in/out in this Telegram bot does NOT register in Bamboo HR.
+                    Please remember to also clock in/out in Bamboo HR itself!
+                    """.replace('                    ','').strip(), 
+                    parse_mode="HTML"
+    )
     
 @dp.message(Command("cancel"))
 async def command_cancel_handler(message: Message, state: FSMContext) -> None:
@@ -208,8 +209,6 @@ async def command_cancel_handler(message: Message, state: FSMContext) -> None:
         await message.answer("❌ Input cancelled.")
     else:
         await message.answer("ℹ️ Nothing to cancel.")
-    
-    
     
 def update_bamboo_status(user: dict):
     if t := user.get('bamboo_phpsessid'):
@@ -222,8 +221,6 @@ def update_bamboo_status(user: dict):
             user['bamboo_status'] = {'error': 'PHPSESSID is invalid/expired'}
         json.dump(user, open(f'subscribers/{user['id']}.json', "w"), indent=2, ensure_ascii=False)
         
-        
-    
 def bamboo_clock_in_out(user: dict, action: str) -> bool:
     if t := user.get('bamboo_phpsessid'):
         s = requests.Session()
@@ -235,21 +232,21 @@ def bamboo_clock_in_out(user: dict, action: str) -> bool:
         update_bamboo_status(user)
         return r.status_code == 200
     return True
-        
-        
+           
 @dp.callback_query(lambda c: c.data and c.data.startswith("action_"))
 async def callback_action_handler(callback: CallbackQuery) -> None:
     """Handle inline button clicks for actions"""
     user_id = callback.from_user.id
-    if not (s := is_subscribed(callback.message)):
-        await message.answer("❌ You're not subscribed! Please subscribe first.")
+    message = callback.message
+    if not (s := is_subscribed(user_id)):
+        await message.answer("❌ You're not subscribed! Please subscribe first using /subscribe.")
         return
     
     action = callback.data.replace("action_", "")
     if action in ["dayin", "dayout", "lunchin", "lunchout"]:
         
         if not bamboo_clock_in_out(s, action):
-            await message.answer(f"{my_info(message)}", parse_mode='HTML')
+            await message.answer(f"{my_info(user_id)}", parse_mode='HTML')
             await message.answer("❌ Failed to clock in/out in Bamboo HR. Check Bamboo HR Log in /my_info.", parse_mode='HTML')
             return
         
@@ -259,8 +256,7 @@ async def callback_action_handler(callback: CallbackQuery) -> None:
         
         await callback.answer(f"✅ {action.upper().replace('IN', ' IN').replace('OUT', ' OUT')} logged!", show_alert=False)
         
-        message = callback.message
-        await message.answer(f"{my_info(message)}", parse_mode='HTML')
+        await message.answer(f"{my_info(user_id)}", parse_mode='HTML')
         await message.answer(f"✅ {action.upper().replace('IN', ' IN').replace('OUT', ' OUT')} successfully logged!", parse_mode='HTML')
         if not s.get('bamboo_phpsessid'):
             await message.answer(f"⚠️ Don't forget to do the same in <b>Bamboo HR</b>!", parse_mode='HTML')
@@ -269,34 +265,35 @@ async def callback_action_handler(callback: CallbackQuery) -> None:
         
 @dp.message(Command("dayin", "dayout", "lunchin", "lunchout", "log"))
 async def command_action_handler(message: Message, command: CommandObject) -> None:
-    if not (s := is_subscribed(message)):
+    if not (s := is_subscribed(user_id := message.from_user.id)):
         await message.answer("❌ You're not subscribed! Please subscribe first.")
         return
     user_id = message.from_user.id
     cmd = command.command
     if cmd in ["dayin", "dayout", "lunchin", "lunchout"]:
         # if datetime.fromisoformat(s.get('log', {}).get(cmd, '2000-01-01T09:00:00+00:00')).astimezone(ZoneInfo(s['timezone'])).strftime('%Y-%m-%d') == datetime.now(ZoneInfo(s['timezone'])).strftime('%Y-%m-%d'):
-        #     await message.answer(f"{my_info(message)}", parse_mode='HTML')
+        #     await message.answer(f"{my_info(user_id)}", parse_mode='HTML')
         #     await message.answer(f"ℹ️ ✅ You've already clocked {cmd.upper()} today at <code>{datetime.fromisoformat(s.get('log', {}).get(cmd, '2000-01-01T09:00:00+00:00')).astimezone(ZoneInfo(s['timezone'])).strftime('%H:%M:%S')}</code>.", parse_mode='HTML')
         #     await message.answer(f"⚠️ Don't forget to do the same in <b>Bamboo HR</b>!", parse_mode='HTML')
         #     return
         if not bamboo_clock_in_out(s, cmd):
-            await message.answer(f"{my_info(message)}", parse_mode='HTML')
+            await message.answer(f"{my_info(user_id)}", parse_mode='HTML')
             await message.answer("❌ Failed to clock in/out in Bamboo HR. Check Bamboo HR Log in /my_info.", parse_mode='HTML')
             return
         s = json.load(open(f'subscribers/{user_id}.json'))
         s['log'][cmd] = datetime.now(timezone.utc).isoformat()
         json.dump(s, open(f'subscribers/{user_id}.json', "w"), indent=2, ensure_ascii=False)
-        await message.answer(f"{my_info(message)}", parse_mode='HTML')
+        await message.answer(f"{my_info(user_id)}", parse_mode='HTML')
         await message.answer(f"✅ {cmd.upper().replace('IN', ' IN').replace('OUT', ' OUT')} successfully logged!", parse_mode='HTML')
         if not s.get('bamboo_phpsessid'):
             await message.answer(f"⚠️ Don't forget to do the same in <b>Bamboo HR</b>!", parse_mode='HTML')
         return
-    await message.answer(f"{my_info(message)}", parse_mode='HTML')
+    await message.answer(f"{my_info(user_id)}", parse_mode='HTML')
     
 @dp.message(Command("reset_day"))
 async def command_reset_day_handler(message: Message) -> None:
-    s = subscriber(message)
+    user_id = message.from_user.id
+    s = subscriber(user_id)
     s['log'] = {
         "dayin": "2000-01-01T09:00:00+00:00",
         "lunchout": "2000-01-01T13:00:00+00:00",
@@ -305,18 +302,18 @@ async def command_reset_day_handler(message: Message) -> None:
     }
     json.dump(s, open(f'subscribers/{message.from_user.id}.json', "w"), indent=2, ensure_ascii=False)
     await message.answer(f"✅ Daily log reseted!")
-    await message.answer(f"{my_info(message)}", parse_mode='HTML')
+    await message.answer(f"{my_info(user_id)}", parse_mode='HTML')
     
 @dp.message(Command("my_info"))
 async def command_my_info_handler(message: Message) -> None:
-    if not (s := is_subscribed(message)):
+    if not (s := is_subscribed(user_id := message.from_user.id)):
         await message.answer("❌ You're not subscribed! Please subscribe first.")
         return
-    await message.answer(f"{my_info(message)}", parse_mode='HTML')
+    await message.answer(f"{my_info(user_id)}", parse_mode='HTML')
     
 @dp.message(Command("subscribe", "follow"))
 async def command_subscribe_handler(message: Message, state: FSMContext) -> None:
-    if is_subscribed(message):
+    if is_subscribed(user_id := message.from_user.id):
         await message.answer("✅ You're already subscribed!")
         return
     
@@ -341,19 +338,20 @@ async def command_subscribe_handler(message: Message, state: FSMContext) -> None
 async def command_set_timezone_handler(message: Message, state: FSMContext) -> None:
     await state.set_state(SubscribeStates.waiting_for_timezone)
     await message.answer("""
-🌍 <b>Please set your timezone</b>
+                🌍 <b>Please set your timezone</b>
 
-Enter your timezone in this format (tap to copy):
+                Enter your timezone in this format (tap to copy):
 
-<code>Asia/Dubai</code>
-<code>Europe/Warsaw</code>
-<code>America/New_York</code>
-<code>Asia/Tokyo</code>
+                <code>Asia/Dubai</code>
+                <code>Europe/Warsaw</code>
+                <code>America/New_York</code>
+                <code>Asia/Tokyo</code>
 
-👉 You can find your exact timezone here: https://en.wikipedia.org/wiki/List_of_tz_database_time_zones
+                👉 You can find your exact timezone here: https://en.wikipedia.org/wiki/List_of_tz_database_time_zones
 
-If you don’t set one, the bot will use UTC (London time, no DST).""".strip(),
-parse_mode="HTML")
+                If you don’t set one, the bot will use UTC (London time, no DST).""".replace('                ','').strip(),
+            parse_mode="HTML"
+    )
     
 def is_valid_timezone(tz_name: str) -> bool:
     """Returns True if the timezone string exists in the IANA database"""
@@ -368,73 +366,76 @@ def is_valid_timezone(tz_name: str) -> bool:
 @dp.message(SubscribeStates.waiting_for_timezone)
 async def process_timezone_handler(message: Message, state: FSMContext) -> None:
     await state.clear()
-    s = subscriber(message)
+    s = subscriber(user_id := message.from_user.id)
     if not is_valid_timezone(message.text.strip()):
         await message.answer("❌ Invalid timezone. Please enter a valid timezone (e.g: 'Asia/Dubai').")
         return
     s['timezone'] = message.text.strip()
     json.dump(s, open(f'subscribers/{message.from_user.id}.json', "w"), indent=2, ensure_ascii=False)
     await message.answer(f"✅ Timezone set to {message.text.strip()}")
-    await message.answer(f"{my_info(message)}", parse_mode='HTML')
-    
+    await message.answer(f"{my_info(user_id)}", parse_mode='HTML')
     
 @dp.message(Command("set_bamboo_phpsessid"))
 async def command_set_bamboo_phpsessid_handler(message: Message, state: FSMContext) -> None:
     await state.set_state(SubscribeStates.waiting_for_bamboo_phpsessid)
     await message.answer("""
-🔐 Please enter your Bamboo HR <b>PHPSESSID</b>
-Use /cancel to abort.
+                    🔐 Please enter your Bamboo HR <b>PHPSESSID</b>
+                    Use /cancel to abort.
 
-Login into Bamboo HR and copy the PHPSESSID from the browser cookies:
-<code>CTRL+SHIFT+I (Developer Tools) -> Application -> Cookies -> PHPSESSID</code>
+                    Login into Bamboo HR and copy the PHPSESSID from the browser cookies:
+                    <code>CTRL+SHIFT+I (Developer Tools) -> Application -> Cookies -> PHPSESSID</code>
 
-PHPSESSID looks like this:
-<i>mThcCZD%2N5wGtGkCsCNb1h6YIt7ML3lW</i>
-""".strip(), parse_mode="HTML")
+                    PHPSESSID looks like this:
+                    <i>mThcCZD%2N5wGtGkCsCNb1h6YIt7ML3lW</i>
+                    """.replace('                    ','').strip(), 
+                    parse_mode="HTML"
+    )
     
 @dp.message(SubscribeStates.waiting_for_bamboo_phpsessid)
 async def process_bamboo_phpsessid_handler(message: Message, state: FSMContext) -> None:
     await state.clear()
-    s = subscriber(message)
+    s = subscriber(user_id := message.from_user.id)
     if not message.text or not message.text.strip():
-        await message.answer(f"{my_info(message)}", parse_mode='HTML')
+        await message.answer(f"{my_info(user_id)}", parse_mode='HTML')
         await message.answer("❌ Action aborted.")
         return
     s['bamboo_phpsessid'] = message.text.strip()
     json.dump(s, open(f'subscribers/{message.from_user.id}.json', "w"), indent=2, ensure_ascii=False)
-    await message.answer(f"{my_info(message)}", parse_mode='HTML')
+    await message.answer(f"{my_info(user_id)}", parse_mode='HTML')
     await message.answer(f"✅ Bamboo HR PHPSESSID set successfully!")
     
 @dp.message(Command("unset_bamboo_phpsessid"))
 async def command_unset_bamboo_phpsessid_handler(message: Message, state: FSMContext) -> None:
     await state.clear()
-    s = subscriber(message)
+    s = subscriber(user_id := message.from_user.id)
     s['bamboo_phpsessid'] = None
     json.dump(s, open(f'subscribers/{message.from_user.id}.json', "w"), indent=2, ensure_ascii=False)
-    await message.answer(f"{my_info(message)}", parse_mode='HTML')
+    await message.answer(f"{my_info(user_id)}", parse_mode='HTML')
     await message.answer(f"✅ Bamboo HR PHPSESSID unset successfully!")
     
-
 @dp.message(Command("set_daily_schedule"))
 async def command_set_daily_schedule_handler(message: Message, state: FSMContext) -> None:
     await state.set_state(SubscribeStates.waiting_for_daily_schedule)
-    await message.answer("""🕒 Please enter your daily schedule for a weekday.
+    await message.answer("""
+                         
+                    🕒 Please enter your daily schedule for a weekday.
 
-Add schedule in the format:
-<code>week_day,day_in,lunch_out,day_out</code>
+                    Add schedule in the format:
+                    <code>week_day,day_in,lunch_out,day_out</code>
 
-week_day: number between 1 and 7 (1 = Monday, 7 = Sunday)
-day_in, lunch_out, day_out: hh:mm in 24-hour format
+                    week_day: number between 1 and 7 (1 = Monday, 7 = Sunday)
+                    day_in, lunch_out, day_out: hh:mm in 24-hour format
 
-📋 Example (tap to copy):
-<code>1,09:00,13:00,18:00</code>
+                    📋 Example (tap to copy):
+                    <code>1,09:00,13:00,18:00</code>
 
-→ This sets Monday: in 09:00 · lunch 13:00 · out 18:00
+                    → This sets Monday: in 09:00 · lunch 13:00 · out 18:00
 
-To delete a day: <code>-1</code> (removes Monday)
+                    To delete a day: <code>-1</code> (removes Monday)
 
-Use /my_info to see your current schedule.""",
-parse_mode="HTML")
+                    Use /my_info to see your current schedule.""".replace('                    ','').strip(),
+                    parse_mode="HTML"
+    )
     
 def is_hh_mm(time_str: str) -> bool:
     try:
@@ -446,7 +447,7 @@ def is_hh_mm(time_str: str) -> bool:
 @dp.message(SubscribeStates.waiting_for_daily_schedule)
 async def process_daily_schedule_handler(message: Message, state: FSMContext) -> None:
     await state.clear()
-    s = subscriber(message)
+    s = subscriber(user_id := message.from_user.id)
     msg = message.text.strip()
     if msg.startswith('-'):
         week_day = int(msg.split(',')[0].strip('-'))
@@ -460,7 +461,7 @@ async def process_daily_schedule_handler(message: Message, state: FSMContext) ->
         s['weekly_schedule'] = arr
         json.dump(s, open(f'subscribers/{message.from_user.id}.json', "w"), indent=2, ensure_ascii=False)
         await message.answer(f"✅ Weekly schedule updated.")
-        await message.answer(f"{my_info(message)}", parse_mode='HTML')
+        await message.answer(f"{my_info(user_id)}", parse_mode='HTML')
         return
     week_day, day_in, lunch_out, day_out = message.text.split(',')
     if not 1 <= int(week_day := week_day.strip()) <= 7:
@@ -482,12 +483,9 @@ async def process_daily_schedule_handler(message: Message, state: FSMContext) ->
     arr[week_day - 1] = f"{week_day},{day_in},{lunch_out},{day_out}"
     s['weekly_schedule'] = arr
     json.dump(s, open(f'subscribers/{message.from_user.id}.json', "w"), indent=2, ensure_ascii=False)
-    await message.answer(f"✅ Your updated weekly schedule is:\n{json.dumps(subscriber(message)['weekly_schedule'], indent=2, ensure_ascii=False)}\n\nSet another day with /set_daily_schedule")
-    await message.answer(f"{my_info(message)}", parse_mode='HTML')
-    
-
-    
-    
+    await message.answer(f"✅ Your updated weekly schedule is:\n{json.dumps(subscriber(message.from_user.id)['weekly_schedule'], indent=2, ensure_ascii=False)}\n\nSet another day with /set_daily_schedule")
+    await message.answer(f"{my_info(user_id)}", parse_mode='HTML')
+       
 @dp.message(Command("unsubscribe", "unfollow"))
 async def command_unsubscribe_handler(message: Message) -> None:
     if os.path.exists(f'subscribers/{message.from_user.id}.json'):
@@ -495,10 +493,6 @@ async def command_unsubscribe_handler(message: Message) -> None:
         await message.answer("✅ You've unsubscribed from reminders!")
     else:
         await message.answer("❌ You're not subscribed! Please subscribe first.")
-
-
-
-
 
 @dp.message(SubscribeStates.waiting_for_password)
 async def process_password_handler(message: Message, state: FSMContext) -> None:
@@ -520,35 +514,48 @@ async def process_password_handler(message: Message, state: FSMContext) -> None:
             
 bot = Bot(token=os.getenv("BOT_TOKEN"))
 
-
-
+last_reminder_messages = {}
 async def check_reminders_loop():
     while True:
         for f in os.listdir('subscribers'):
             if f.endswith('.json'):
-                s = json.load(open(f'subscribers/{f}'))
-                update_bamboo_status(s)
-                n = datetime.now(ZoneInfo(s.get('timezone', 'UTC')))
-                week_day = n.isoweekday()
-                past = n - timedelta(hours=48)
-                ymd, hm =  n.strftime('%Y-%m-%d'), n.strftime('%H:%M')
-                schedule = [a for a in s.get('weekly_schedule', []) if a and a.split(',')[0] == str(week_day)]
-                if not schedule:
-                    continue
-                target_day_in, target_lunch_out, target_day_out = schedule[0].split(',')[1:]
-                log = s.get('log', {})
-                has_dayin = datetime.fromisoformat(log.get('dayin', past.isoformat())).astimezone(ZoneInfo(s.get('timezone', 'UTC'))).strftime('%Y-%m-%d') == ymd
-                has_lunchout = (lunchout :=datetime.fromisoformat(log.get('lunchout', past.isoformat()))).astimezone(ZoneInfo(s.get('timezone', 'UTC'))).strftime('%Y-%m-%d') == ymd
-                has_lunchin = datetime.fromisoformat(log.get('lunchin', past.isoformat())).astimezone(ZoneInfo(s.get('timezone', 'UTC'))).strftime('%Y-%m-%d') == ymd
-                has_dayout = datetime.fromisoformat(log.get('dayout', past.isoformat())).astimezone(ZoneInfo(s.get('timezone', 'UTC'))).strftime('%Y-%m-%d') == ymd
-                if not has_dayin and hm >= target_day_in.strip().lower():
-                    await bot.send_message(s['id'], f"Reminder: {action_to_icon['dayin']} Day IN!", reply_markup=create_action_keyboard('dayin'))
-                if has_dayin and not has_lunchout and hm >= target_lunch_out.strip().lower():
-                    await bot.send_message(s['id'], f"Reminder: {action_to_icon['lunchout']} Lunch OUT!", reply_markup=create_action_keyboard('lunchout'))
-                if has_dayin and has_lunchout and not has_lunchin and lunchout + timedelta(hours=1) <= n:
-                    await bot.send_message(s['id'], f"Reminder: {action_to_icon['lunchin']} Lunch IN!", reply_markup=create_action_keyboard('lunchin'))
-                if has_dayin and has_lunchin and has_lunchout and not has_dayout and hm >= target_day_out.strip().lower():
-                    await bot.send_message(s['id'], f"Reminder: {action_to_icon['dayout']} Day OUT!", reply_markup=create_action_keyboard('dayout'))
+                try:
+                    s = json.load(open(f'subscribers/{f}'))
+                    update_bamboo_status(s)
+                    n = datetime.now(ZoneInfo(s.get('timezone', 'UTC')))
+                    week_day = n.isoweekday()
+                    past = n - timedelta(hours=48)
+                    ymd, hm =  n.strftime('%Y-%m-%d'), n.strftime('%H:%M')
+                    schedule = [a for a in s.get('weekly_schedule', []) if a and a.split(',')[0] == str(week_day)]
+                    if not schedule:
+                        continue
+                    target_day_in, target_lunch_out, target_day_out = schedule[0].split(',')[1:]
+                    log = s.get('log', {})
+                    has_dayin = datetime.fromisoformat(log.get('dayin', past.isoformat())).astimezone(ZoneInfo(s.get('timezone', 'UTC'))).strftime('%Y-%m-%d') == ymd
+                    has_lunchout = (lunchout :=datetime.fromisoformat(log.get('lunchout', past.isoformat()))).astimezone(ZoneInfo(s.get('timezone', 'UTC'))).strftime('%Y-%m-%d') == ymd
+                    has_lunchin = datetime.fromisoformat(log.get('lunchin', past.isoformat())).astimezone(ZoneInfo(s.get('timezone', 'UTC'))).strftime('%Y-%m-%d') == ymd
+                    has_dayout = datetime.fromisoformat(log.get('dayout', past.isoformat())).astimezone(ZoneInfo(s.get('timezone', 'UTC'))).strftime('%Y-%m-%d') == ymd
+                    message, action = None, None
+                    if not has_dayin and hm >= target_day_in.strip().lower():
+                        message = await bot.send_message(s['id'], f"Reminder: {action_to_icon['dayin']} Day IN!", reply_markup=create_action_keyboard('dayin'))
+                        action = 'dayin'
+                    if has_dayin and not has_lunchout and hm >= target_lunch_out.strip().lower():
+                        message = await bot.send_message(s['id'], f"Reminder: {action_to_icon['lunchout']} Lunch OUT!", reply_markup=create_action_keyboard('lunchout'))
+                        action = 'lunchout'
+                    if has_dayin and has_lunchout and not has_lunchin and lunchout + timedelta(hours=1) <= n:
+                        message = await bot.send_message(s['id'], f"Reminder: {action_to_icon['lunchin']} Lunch IN!", reply_markup=create_action_keyboard('lunchin'))
+                        action = 'lunchin'
+                    if has_dayin and has_lunchin and has_lunchout and not has_dayout and hm >= target_day_out.strip().lower():
+                        message = await bot.send_message(s['id'], f"Reminder: {action_to_icon['dayout']} Day OUT!", reply_markup=create_action_keyboard('dayout'))
+                        action = 'dayout'
+                    if message and action:
+                        if last_reminder_messages.get(f"{s['id']}") and last_reminder_messages[f"{s['id']}"].get('action') == action:
+                            await bot.delete_message(s['id'], last_reminder_messages[f"{s['id']}"].get('id'))
+                        last_reminder_messages[f"{s['id']}"] = {'id': message.message_id, 'action': action}
+                except Exception as e:
+                    traceback.print_exc()
+                    logger.error(f"Error checking reminders for {f}: {e}. {s}")
+                    
         await asyncio.sleep(60*5)
 
 async def main() -> None:
@@ -559,4 +566,3 @@ async def main() -> None:
 
 if __name__ == "__main__":
     asyncio.run(main())
-          
