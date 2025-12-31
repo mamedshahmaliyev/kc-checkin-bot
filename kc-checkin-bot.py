@@ -1,6 +1,9 @@
 import os, dotenv, requests, re, traceback
 from zoneinfo import ZoneInfo
 dotenv.load_dotenv(override=True)
+from textwrap import dedent
+
+from jira import JIRA
 
 from aiogram.exceptions import TelegramForbiddenError
 
@@ -83,6 +86,7 @@ class SubscribeStates(StatesGroup):
     waiting_for_daily_schedule = State()
     waiting_for_timezone = State()
     waiting_for_bamboo_phpsessid = State()
+    waiting_for_jira_credentials = State()
 
 async def on_startup(bot: Bot):
     await bot.set_my_commands([
@@ -93,6 +97,8 @@ async def on_startup(bot: Bot):
         BotCommand(command="subscribe", description="Subscribe to get reminders for the day"),
         BotCommand(command="set_bamboo_phpsessid", description="Set Bamboo HR PHPSESSID"),
         BotCommand(command="unset_bamboo_phpsessid", description="Unset Bamboo HR PHPSESSID"),
+        BotCommand(command="set_jira_credentials", description="Set Jira credentials"),
+        BotCommand(command="unset_jira_credentials", description="Unset Jira credentials"),
         BotCommand(command="my_info", description="Show your info"),
         BotCommand(command="set_daily_schedule", description="Set your daily schedule for a weekday"),
         BotCommand(command="set_timezone", description="Set your timezone, default is UTC"),
@@ -173,13 +179,23 @@ def my_info_from_user_id(user_id: int) -> str:
             msg += f"  {log.get('start').split(' ')[1]} -> {log.get('end').split(' ')[1] if log.get('end') else 'now'}, {date_diff_in_hhmm(log.get('start'), log.get('end') or datetime.now(ZoneInfo(timezone)).strftime('%Y-%m-%d %H:%M:%S'))}\n"
     else:
         msg += f"\n🔐 Bamboo HR PHPSESSID: N/A\nuse /set_bamboo_phpsessid to set\n"
+    if j := s.get('jira_credentials'):
+        jemail, jtoken = j.split(',')
+        jtoken = f"{jtoken[:5]}**{jtoken[-5:]}"
+        j = f"{jemail},{jtoken}"
+        msg += f"\n🐞 Jira Credentials:\n<code>{j}</code>\nUse /unset_jira_credentials to unset\nUse /set_jira_credentials to update\n"
+        msg += f"\n🐞 Latest Jira Worklogs:\n"
+        for jira_status in s.get('jira_status', []):
+            msg += f"    {jira_status}\n"
+    else:
+        msg += f"\n🐞 Jira credentials: N/A\nuse /set_jira_credentials to set\n"
     msg += f"\nℹ️ Use /my_info to show your info."
     
     return msg.strip()
 
 @dp.message(Command("start"))
 async def command_start_handler(message: Message) -> None:
-    await message.answer("""
+    await message.answer(dedent("""
                     Hello! 
 
                     ⏱️ I'm <b>KC Checkin Bot</b>. 
@@ -190,15 +206,16 @@ async def command_start_handler(message: Message) -> None:
                     Use /set_timezone to set your timezone, default is UTC.
                     Use /set_daily_schedule to set your daily schedule for a weekday.
                     Use /set_bamboo_phpsessid to set your Bamboo HR PHPSESSID.
-
+                    Use /set_jira_credentials to set your Jira credentials.
+                    
                     Use /my_info to show your current info.
 
                     Checkout ≡ menu for more commands.
 
                     ⚠️ Important:
-                    Clocking in/out in this Telegram bot does NOT register in Bamboo HR.
+                    If bamboo session id is not set clocking in/out in this Telegram bot does NOT register in Bamboo HR.
                     Please remember to also clock in/out in Bamboo HR itself!
-                    """.replace('                    ','').strip(), 
+                    """).strip(), 
                     parse_mode="HTML"
     )
     
@@ -234,7 +251,30 @@ def bamboo_clock_in_out(user: dict, action: str) -> bool:
         update_bamboo_status(user)
         return r.status_code == 200
     return True
-           
+  
+     
+def update_jira_status(user: dict):
+    if j := user.get('jira_credentials'):
+        try:
+            jemail, jtoken = j.split(',')
+            jira = JIRA('https://knowledgecity.atlassian.net', basic_auth=(jemail.strip(), jtoken.strip()))
+            jql_query = f'''issuekey IN updatedBy("{jemail.strip()}", "-7d") ORDER BY created DESC'''
+            issues = jira.search_issues(jql_query, maxResults=1000, fields='summary,updated,comment')  # Increase maxResults as needed
+            tz = ZoneInfo(user.get('timezone', 'UTC'))
+            jira_status = []
+            for issue in issues:
+                for wl in sorted(jira.worklogs(issue.key) or [], key=lambda w: w.started or w.created, reverse=True):
+                    d = datetime.fromisoformat(wl.started or wl.created).astimezone(tz)
+                    if d.date() >= datetime.now().astimezone(tz).date() - timedelta(days=2):
+                        if wl.raw['author'].get('emailAddress', '').lower() == jemail.strip().lower():
+                            jira_status.append(f"<code>{issue.key}</code>: {wl.raw.get('comment', '').strip()} [{wl.timeSpent or "0m"}] at <i>{d.strftime('%Y-%m-%d %H:%M')}</i>")
+        except Exception as e:
+            jira_status.append(f"❌ Error fetching jira worklogs: {e}")
+        jira_status = sorted(jira_status, key=lambda x: x.split('at ')[-1], reverse=True)
+        user['jira_status'] = jira_status
+        json.dump(user, open(f'subscribers/{user['id']}.json', "w"), indent=2, ensure_ascii=False)
+   
+            
 @dp.callback_query(lambda c: c.data and c.data.startswith("action_"))
 async def callback_action_handler(callback: CallbackQuery) -> None:
     """Handle inline button clicks for actions"""
@@ -415,6 +455,38 @@ async def command_unset_bamboo_phpsessid_handler(message: Message, state: FSMCon
     await message.answer(f"{my_info(user_id)}", parse_mode='HTML')
     await message.answer(f"✅ Bamboo HR PHPSESSID unset successfully!")
     
+@dp.message(Command("set_jira_credentials"))
+async def command_set_jira_credentials_handler(message: Message, state: FSMContext) -> None:
+    await state.set_state(SubscribeStates.waiting_for_jira_credentials)
+    await message.answer(dedent("""
+                    🐞 Please enter your Jira credentials in format:
+                    <code>your_email,api_token</code>
+                    
+                    Use: https://id.atlassian.com/manage-profile/security/api-tokens to generate your API token.
+                    """).strip(),
+                    parse_mode="HTML"
+    )
+    
+@dp.message(SubscribeStates.waiting_for_jira_credentials)
+async def process_jira_credentials_handler(message: Message, state: FSMContext) -> None:
+    await state.clear()
+    s = subscriber(user_id := message.from_user.id)
+    if len(message.text.strip().split(',')) != 2:
+        await message.answer("❌ Invalid Jira credentials. Please enter a valid email and api_token in the format email,api_token.")
+        return
+    s['jira_credentials'] = message.text.strip()
+    json.dump(s, open(f'subscribers/{message.from_user.id}.json', "w"), indent=2, ensure_ascii=False)
+    await message.answer(f"{my_info(user_id)}", parse_mode='HTML')
+    await message.answer(f"✅ Jira credentials set successfully!")
+    
+@dp.message(Command("unset_jira_credentials"))
+async def command_unset_jira_credentials_handler(message: Message, state: FSMContext) -> None:
+    await state.clear()
+    s = subscriber(user_id := message.from_user.id)
+    s['jira_credentials'] = None
+    json.dump(s, open(f'subscribers/{message.from_user.id}.json', "w"), indent=2, ensure_ascii=False)
+    await message.answer(f"{my_info(user_id)}", parse_mode='HTML')
+
 @dp.message(Command("set_daily_schedule"))
 async def command_set_daily_schedule_handler(message: Message, state: FSMContext) -> None:
     await state.set_state(SubscribeStates.waiting_for_daily_schedule)
@@ -524,6 +596,7 @@ async def check_reminders_loop():
                 try:
                     s = json.load(open(f'subscribers/{f}'))
                     update_bamboo_status(s)
+                    update_jira_status(s)
                     n = datetime.now(ZoneInfo(s.get('timezone', 'UTC')))
                     week_day = n.isoweekday()
                     past = n - timedelta(hours=48)

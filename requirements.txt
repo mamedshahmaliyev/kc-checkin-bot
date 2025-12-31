@@ -3,3 +3,4 @@ python-dotenv
 aiogram
 requests
 httpx
+jira
