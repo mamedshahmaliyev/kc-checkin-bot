@@ -144,7 +144,7 @@ def subscribe(message: Message):
         }, open(f'subscribers/{message.from_user.id}.json', "w"), indent=2, ensure_ascii=False)
         
 def subscriber(user_id) -> dict:
-    return json.load(open(f'subscribers/{user_id}.json'))
+    return json.load(open(f'subscribers/{user_id}.json')) if os.path.exists(f'subscribers/{user_id}.json') else None
 
 def my_info(user_id) -> str:
     s = subscriber(user_id)
@@ -187,7 +187,7 @@ def my_info_from_user_id(user_id: int) -> str:
         j = f"{jemail},{jtoken}"
         msg += f"\n🐞 Jira Credentials:\n<code>{j}</code>\nUse /unset_jira_credentials to unset\nUse /set_jira_credentials to update\nUse /add_jira_worklog to add Jira worklog.\n"
         msg += f"\n🐞 Worklog for 2 days (/add_jira_worklog):\n"
-        for jira_status in s.get('jira_status', []):
+        for jira_status in s.get('jira_status') or []:
             msg += f"    <code>{jira_status['issue_key']}</code> [{jira_status['time_spent']}]: {jira_status['comment']} [<i>{datetime.fromisoformat(jira_status['date']).astimezone(ZoneInfo(timezone)).strftime('%Y-%m-%d %H:%M')}</i>]\n"
     else:
         msg += f"\n🐞 Jira credentials: N/A\nuse /set_jira_credentials to set\n"
@@ -322,7 +322,7 @@ async def callback_action_handler(callback: CallbackQuery) -> None:
 @dp.message(Command("dayin", "dayout", "lunchin", "lunchout", "log"))
 async def command_action_handler(message: Message, command: CommandObject) -> None:
     if not (s := is_subscribed(user_id := message.from_user.id)):
-        await message.answer("❌ You're not subscribed! Please subscribe first.")
+        await message.answer("❌ You're not subscribed! Please /subscribe first.")
         return
     user_id = message.from_user.id
     cmd = command.command
@@ -364,7 +364,7 @@ async def command_reset_day_handler(message: Message) -> None:
 @dp.message(Command("my_info"))
 async def command_my_info_handler(message: Message) -> None:
     if not (s := is_subscribed(user_id := message.from_user.id)):
-        await message.answer("❌ You're not subscribed! Please subscribe first.")
+        await message.answer("❌ You're not subscribed! Please /subscribe first.")
         return
     
     loading_msg = await message.answer("⏳ Loading your info...")
@@ -393,10 +393,13 @@ async def command_subscribe_handler(message: Message, state: FSMContext) -> None
     
     # Ask for password in next message
     await state.set_state(SubscribeStates.waiting_for_password)
-    await message.answer("🔐 Please enter your subscriber password:")
+    await message.answer("🔐 Please enter your subscriber password (or /cancel to abort):")
     
 @dp.message(Command("set_timezone"))
 async def command_set_timezone_handler(message: Message, state: FSMContext) -> None:
+    if not (s := is_subscribed(user_id := message.from_user.id)):
+        await message.answer("❌ You're not subscribed! Please /subscribe first.")
+        return
     await state.set_state(SubscribeStates.waiting_for_timezone)
     await message.answer(dedent("""
                 🌍 <b>Please set your timezone</b>
@@ -442,7 +445,7 @@ async def process_timezone_handler(message: Message, state: FSMContext) -> None:
 @dp.message(Command("set_bamboo_phpsessid"))
 async def command_set_bamboo_phpsessid_handler(message: Message, state: FSMContext) -> None:
     if not (s := is_subscribed(user_id := message.from_user.id)):
-        await message.answer("❌ You're not subscribed! Please subscribe first.")
+        await message.answer("❌ You're not subscribed! Please /subscribe first.")
         return
     await state.set_state(SubscribeStates.waiting_for_bamboo_phpsessid)
     await message.answer("""
@@ -476,7 +479,7 @@ async def process_bamboo_phpsessid_handler(message: Message, state: FSMContext) 
 @dp.message(Command("unset_bamboo_phpsessid"))
 async def command_unset_bamboo_phpsessid_handler(message: Message, state: FSMContext) -> None:
     if not (s := is_subscribed(user_id := message.from_user.id)):
-        await message.answer("❌ You're not subscribed! Please subscribe first.")
+        await message.answer("❌ You're not subscribed! Please /subscribe first.")
         return
     await state.clear()
     s['bamboo_phpsessid'] = None
@@ -486,6 +489,9 @@ async def command_unset_bamboo_phpsessid_handler(message: Message, state: FSMCon
     
 @dp.message(Command("set_jira_credentials"))
 async def command_set_jira_credentials_handler(message: Message, state: FSMContext) -> None:
+    if not (s := is_subscribed(user_id := message.from_user.id)):
+        await message.answer("❌ You're not subscribed! Please /subscribe first.")
+        return
     await state.set_state(SubscribeStates.waiting_for_jira_credentials)
     await message.answer(dedent("""
                     🐞 Please enter your Jira credentials in format:
@@ -512,8 +518,10 @@ async def process_jira_credentials_handler(message: Message, state: FSMContext) 
     
 @dp.message(Command("unset_jira_credentials"))
 async def command_unset_jira_credentials_handler(message: Message, state: FSMContext) -> None:
+    if not (s := is_subscribed(user_id := message.from_user.id)):
+        await message.answer("❌ You're not subscribed! Please /subscribe first.")
+        return
     await state.clear()
-    s = subscriber(user_id := message.from_user.id)
     s['jira_credentials'] = None
     json.dump(s, open(f'subscribers/{message.from_user.id}.json', "w"), indent=2, ensure_ascii=False)
     await message.answer(f"{my_info(user_id)}", parse_mode='HTML')
@@ -521,13 +529,13 @@ async def command_unset_jira_credentials_handler(message: Message, state: FSMCon
 @dp.message(Command("add_jira_worklog"))
 async def command_add_jira_worklog_handler(message: Message, state: FSMContext) -> None:
     if not (s := subscriber(user_id := message.from_user.id)):
-        await message.answer("❌ You're not subscribed! Please subscribe first.")
+        await message.answer("❌ You're not subscribed! Please /subscribe first.")
         return
     await state.set_state(SubscribeStates.waiting_for_jira_worklog)
     examples = []
     examples.append(f"<code>KC-123,{datetime.now(ZoneInfo(s.get('timezone', 'UTC'))).strftime('%Y-%m-%d %H:%M')},45m,Worked on feature X</code>")
     examples.append(f"<code>KC-456,{datetime.now(ZoneInfo(s.get('timezone', 'UTC'))).strftime('%H:%M')},1h 5m,Meeting with Alice & Bob</code> (note: date is today if not provided)")
-    for i, jira_status in enumerate(s.get('jira_status', [])[:4]):
+    for i, jira_status in enumerate((s.get('jira_status') or [])[:4]):
         fmt = '%H:%M'
         examples.append(f"<code>{jira_status['issue_key']},{datetime.fromisoformat(jira_status['date']).astimezone(ZoneInfo(s.get('timezone', 'UTC'))).strftime(fmt)},{jira_status['time_spent']},{jira_status['comment']}</code>")
     examples = '\n\n'.join(examples)
@@ -548,7 +556,7 @@ async def command_add_jira_worklog_handler(message: Message, state: FSMContext) 
 @dp.message(SubscribeStates.waiting_for_jira_worklog)
 async def process_jira_worklog_handler(message: Message, state: FSMContext) -> None:
     if not is_subscribed(user_id := message.from_user.id):
-        await message.answer("❌ You're not subscribed! Please subscribe first.")
+        await message.answer("❌ You're not subscribed! Please /subscribe first.")
         return
     s = subscriber(user_id)
     if not (jira_credentials := get_jira_credentials(s)):
@@ -576,6 +584,9 @@ async def process_jira_worklog_handler(message: Message, state: FSMContext) -> N
    
 @dp.message(Command("set_daily_schedule"))
 async def command_set_daily_schedule_handler(message: Message, state: FSMContext) -> None:
+    if not (s := is_subscribed(user_id := message.from_user.id)):
+        await message.answer("❌ You're not subscribed! Please /subscribe first.")
+        return
     await state.set_state(SubscribeStates.waiting_for_daily_schedule)
     await message.answer(dedent("""
                          
@@ -656,7 +667,7 @@ async def command_unsubscribe_handler(message: Message) -> None:
         os.remove(f'subscribers/{message.from_user.id}.json')
         await message.answer("✅ You've unsubscribed from reminders!")
     else:
-        await message.answer("❌ You're not subscribed! Please subscribe first.")
+        await message.answer("❌ You're not subscribed! Please /subscribe first.")
 
 @dp.message(SubscribeStates.waiting_for_password)
 async def process_password_handler(message: Message, state: FSMContext) -> None:
@@ -671,6 +682,7 @@ async def process_password_handler(message: Message, state: FSMContext) -> None:
     if password == os.getenv('SUBSCRIBER_PASSWORD'):
         logger.info(f"/subscribe from {message.from_user.full_name} ({message.from_user.id})")
         subscribe(message)
+        await message.answer(f"{my_info(message.from_user.id)}", parse_mode='HTML')
         await message.answer("✅ Password correct! You've subscribed to reminders!")
         await state.clear()
     else:
