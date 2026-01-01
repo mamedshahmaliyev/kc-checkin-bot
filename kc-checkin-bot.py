@@ -87,6 +87,7 @@ class SubscribeStates(StatesGroup):
     waiting_for_timezone = State()
     waiting_for_bamboo_phpsessid = State()
     waiting_for_jira_credentials = State()
+    waiting_for_jira_worklog = State()
 
 async def on_startup(bot: Bot):
     await bot.set_my_commands([
@@ -99,6 +100,7 @@ async def on_startup(bot: Bot):
         BotCommand(command="unset_bamboo_phpsessid", description="Unset Bamboo HR PHPSESSID"),
         BotCommand(command="set_jira_credentials", description="Set Jira credentials"),
         BotCommand(command="unset_jira_credentials", description="Unset Jira credentials"),
+        BotCommand(command="add_jira_worklog", description="Add Jira worklog"),
         BotCommand(command="my_info", description="Show your info"),
         BotCommand(command="set_daily_schedule", description="Set your daily schedule for a weekday"),
         BotCommand(command="set_timezone", description="Set your timezone, default is UTC"),
@@ -183,8 +185,8 @@ def my_info_from_user_id(user_id: int) -> str:
         jemail, jtoken = j.split(',')
         jtoken = f"{jtoken[:5]}**{jtoken[-5:]}"
         j = f"{jemail},{jtoken}"
-        msg += f"\n🐞 Jira Credentials:\n<code>{j}</code>\nUse /unset_jira_credentials to unset\nUse /set_jira_credentials to update\n"
-        msg += f"\n🐞 Latest Jira Worklogs:\n"
+        msg += f"\n🐞 Jira Credentials:\n<code>{j}</code>\nUse /unset_jira_credentials to unset\nUse /set_jira_credentials to update\nUse /add_jira_worklog to add Jira worklog.\n"
+        msg += f"\n🐞 Worklog for 2 days (/add_jira_worklog):\n"
         for jira_status in s.get('jira_status', []):
             msg += f"    {jira_status}\n"
     else:
@@ -204,9 +206,12 @@ async def command_start_handler(message: Message) -> None:
                     Use /subscribe and enter password to subscribe for reminders.
 
                     Use /set_timezone to set your timezone, default is UTC.
+                    
                     Use /set_daily_schedule to set your daily schedule for a weekday.
                     Use /set_bamboo_phpsessid to set your Bamboo HR PHPSESSID.
+
                     Use /set_jira_credentials to set your Jira credentials.
+                    Use /add_jira_worklog to add Jira worklog.
                     
                     Use /my_info to show your current info.
 
@@ -252,25 +257,29 @@ def bamboo_clock_in_out(user: dict, action: str) -> bool:
         return r.status_code == 200
     return True
   
-     
-def update_jira_status(user: dict):
+def get_jira_credentials(user: dict) -> tuple[str, str]:
     if j := user.get('jira_credentials'):
+        return [j.split(',')[0].strip(), j.split(',')[1].strip()]
+    return None
+
+def update_jira_status(user: dict):
+    if jira_credentials := get_jira_credentials(user):
+        jira_status = []
         try:
-            jemail, jtoken = j.split(',')
-            jira = JIRA('https://knowledgecity.atlassian.net', basic_auth=(jemail.strip(), jtoken.strip()))
-            jql_query = f'''issuekey IN updatedBy("{jemail.strip()}", "-7d") ORDER BY created DESC'''
+            jemail, jtoken = jira_credentials
+            jira = JIRA(os.getenv('JIRA_SERVER'), basic_auth=tuple(jira_credentials))
+            jql_query = f'''issuekey IN updatedBy("{jemail.strip()}", "-3d") ORDER BY created DESC'''
             issues = jira.search_issues(jql_query, maxResults=1000, fields='summary,updated,comment')  # Increase maxResults as needed
             tz = ZoneInfo(user.get('timezone', 'UTC'))
-            jira_status = []
             for issue in issues:
                 for wl in sorted(jira.worklogs(issue.key) or [], key=lambda w: w.started or w.created, reverse=True):
                     d = datetime.fromisoformat(wl.started or wl.created).astimezone(tz)
                     if d.date() >= datetime.now().astimezone(tz).date() - timedelta(days=2):
                         if wl.raw['author'].get('emailAddress', '').lower() == jemail.strip().lower():
-                            jira_status.append(f"<code>{issue.key}</code>: {wl.raw.get('comment', '').strip()} [{wl.timeSpent or "0m"}] at <i>{d.strftime('%Y-%m-%d %H:%M')}</i>")
+                            jira_status.append(f"<code>{issue.key}</code> [{wl.timeSpent or "0m"}]: {wl.raw.get('comment', '').strip()} [<i>{d.strftime('%Y-%m-%d %H:%M')}</i>]")
         except Exception as e:
             jira_status.append(f"❌ Error fetching jira worklogs: {e}")
-        jira_status = sorted(jira_status, key=lambda x: x.split('at ')[-1], reverse=True)
+        jira_status = sorted(jira_status, key=lambda x: x.split('<i>')[-1], reverse=True)
         user['jira_status'] = jira_status
         json.dump(user, open(f'subscribers/{user['id']}.json', "w"), indent=2, ensure_ascii=False)
    
@@ -351,6 +360,9 @@ async def command_my_info_handler(message: Message) -> None:
     if not (s := is_subscribed(user_id := message.from_user.id)):
         await message.answer("❌ You're not subscribed! Please subscribe first.")
         return
+    
+    update_bamboo_status(s)
+    update_jira_status(s)
     await message.answer(f"{my_info(user_id)}", parse_mode='HTML')
     
 @dp.message(Command("subscribe", "follow"))
@@ -487,6 +499,52 @@ async def command_unset_jira_credentials_handler(message: Message, state: FSMCon
     json.dump(s, open(f'subscribers/{message.from_user.id}.json', "w"), indent=2, ensure_ascii=False)
     await message.answer(f"{my_info(user_id)}", parse_mode='HTML')
 
+@dp.message(Command("add_jira_worklog"))
+async def command_add_jira_worklog_handler(message: Message, state: FSMContext) -> None:
+    await state.set_state(SubscribeStates.waiting_for_jira_worklog)
+    await message.answer(dedent("""
+                    🐞 Please enter your Jira worklog in format:
+                    
+                    <code>issue_key,started_at,time_spent,comment</code>
+                    
+                    Example1:
+                    <code>KC-123,2025-12-31 09:00,85m,Worked on feature X</code>
+                    
+                    Example2 (date is today):
+                    <code>KC-123,09:00,1h 5m,Worked on feature X</code>
+                    """).strip(),
+                    parse_mode="HTML"
+    )
+    
+@dp.message(SubscribeStates.waiting_for_jira_worklog)
+async def process_jira_worklog_handler(message: Message, state: FSMContext) -> None:
+    if not is_subscribed(user_id := message.from_user.id):
+        await message.answer("❌ You're not subscribed! Please subscribe first.")
+        return
+    s = subscriber(user_id)
+    if not (jira_credentials := get_jira_credentials(s)):
+        await message.answer("❌ Jira credentials not set. Please set Jira credentials first using /set_jira_credentials.")
+        return
+    await state.clear()
+    arr = message.text.strip().split(',')
+    if len(arr) < 4:
+        await message.answer("❌ Invalid Jira worklog format.")
+        return
+    issue_id, started_at, time_spent, comment = arr[0].strip(), arr[1].strip(), arr[2].strip(), ','.join(arr[3:]).strip()
+    try:
+        if len(started_at) == 5:
+            started_at = datetime.now(ZoneInfo(s['timezone'])).replace(hour=int(started_at.split(':')[0]), minute=int(started_at.split(':')[1]))
+        else:
+            started_at = datetime.strptime(started_at, '%Y-%m-%d %H:%M').astimezone(ZoneInfo(s['timezone']))
+    except Exception as e:
+        await message.answer(f"❌ Invalid started at format. Please enter a valid started at in the format yyyy-mm-dd hh:mm or in hh:mm format (e.g: 09:00). {e}")
+        return
+    jira = JIRA(options={'server': os.getenv('JIRA_SERVER')}, basic_auth=tuple(jira_credentials))
+    jira.add_worklog(issue=issue_id, started=started_at, timeSpent=time_spent, comment=comment)
+    update_jira_status(subscriber(user_id))
+    await message.answer(f"{my_info(user_id)}", parse_mode='HTML')
+    await message.answer(f"✅ Jira worklog added successfully!")
+   
 @dp.message(Command("set_daily_schedule"))
 async def command_set_daily_schedule_handler(message: Message, state: FSMContext) -> None:
     await state.set_state(SubscribeStates.waiting_for_daily_schedule)
