@@ -208,6 +208,7 @@ async def command_start_handler(message: Message) -> None:
                     Use /set_timezone to set your timezone, default is UTC.
                     
                     Use /set_daily_schedule to set your daily schedule for a weekday.
+                    
                     Use /set_bamboo_phpsessid to set your Bamboo HR PHPSESSID.
 
                     Use /set_jira_credentials to set your Jira credentials.
@@ -219,7 +220,6 @@ async def command_start_handler(message: Message) -> None:
 
                     ⚠️ Important:
                     If bamboo session id is not set clocking in/out in this Telegram bot does NOT register in Bamboo HR.
-                    Please remember to also clock in/out in Bamboo HR itself!
                     """).strip(), 
                     parse_mode="HTML"
     )
