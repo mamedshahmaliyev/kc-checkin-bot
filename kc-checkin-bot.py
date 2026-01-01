@@ -441,6 +441,9 @@ async def process_timezone_handler(message: Message, state: FSMContext) -> None:
     
 @dp.message(Command("set_bamboo_phpsessid"))
 async def command_set_bamboo_phpsessid_handler(message: Message, state: FSMContext) -> None:
+    if not (s := is_subscribed(user_id := message.from_user.id)):
+        await message.answer("❌ You're not subscribed! Please subscribe first.")
+        return
     await state.set_state(SubscribeStates.waiting_for_bamboo_phpsessid)
     await message.answer("""
                     🔐 Please enter your Bamboo HR <b>PHPSESSID</b>
@@ -472,8 +475,10 @@ async def process_bamboo_phpsessid_handler(message: Message, state: FSMContext) 
     
 @dp.message(Command("unset_bamboo_phpsessid"))
 async def command_unset_bamboo_phpsessid_handler(message: Message, state: FSMContext) -> None:
+    if not (s := is_subscribed(user_id := message.from_user.id)):
+        await message.answer("❌ You're not subscribed! Please subscribe first.")
+        return
     await state.clear()
-    s = subscriber(user_id := message.from_user.id)
     s['bamboo_phpsessid'] = None
     json.dump(s, open(f'subscribers/{message.from_user.id}.json', "w"), indent=2, ensure_ascii=False)
     await message.answer(f"{my_info(user_id)}", parse_mode='HTML')
