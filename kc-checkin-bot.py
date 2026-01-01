@@ -188,7 +188,7 @@ def my_info_from_user_id(user_id: int) -> str:
         msg += f"\n🐞 Jira Credentials:\n<code>{j}</code>\nUse /unset_jira_credentials to unset\nUse /set_jira_credentials to update\nUse /add_jira_worklog to add Jira worklog.\n"
         msg += f"\n🐞 Worklog for 2 days (/add_jira_worklog):\n"
         for jira_status in s.get('jira_status', []):
-            msg += f"    {jira_status}\n"
+            msg += f"    <code>{jira_status['issue_key']}</code> [{jira_status['time_spent']}]: {jira_status['comment']} [<i>{datetime.fromisoformat(jira_status['date']).astimezone(ZoneInfo(timezone)).strftime('%Y-%m-%d %H:%M')}</i>]\n"
     else:
         msg += f"\n🐞 Jira credentials: N/A\nuse /set_jira_credentials to set\n"
     msg += f"\nℹ️ Use /my_info to show your info."
@@ -276,11 +276,15 @@ def update_jira_status(user: dict):
                     d = datetime.fromisoformat(wl.started or wl.created).astimezone(tz)
                     if d.date() >= datetime.now().astimezone(tz).date() - timedelta(days=2):
                         if wl.raw['author'].get('emailAddress', '').lower() == jemail.strip().lower():
-                            jira_status.append(f"<code>{issue.key}</code> [{wl.timeSpent or "0m"}]: {wl.raw.get('comment', '').strip()} [<i>{d.strftime('%Y-%m-%d %H:%M')}</i>]")
+                            jira_status.append({
+                                "issue_key": issue.key,
+                                "time_spent": wl.timeSpent or "0m",
+                                "comment": wl.raw.get('comment', '').strip(),
+                                "date": d.isoformat(),
+                            })
         except Exception as e:
-            jira_status.append(f"❌ Error fetching jira worklogs: {e}")
-        jira_status = sorted(jira_status, key=lambda x: x.split('<i>')[-1], reverse=True)
-        user['jira_status'] = jira_status
+            jira_status.append({"comment": f"❌ Error fetching jira worklogs: {e}", "date": datetime.now(ZoneInfo(user.get('timezone', 'UTC'))).isoformat()})
+        user['jira_status'] = sorted(jira_status, key=lambda x: x['date'], reverse=True)
         json.dump(user, open(f'subscribers/{user['id']}.json', "w"), indent=2, ensure_ascii=False)
    
             
@@ -295,9 +299,10 @@ async def callback_action_handler(callback: CallbackQuery) -> None:
     
     action = callback.data.replace("action_", "")
     if action in ["dayin", "dayout", "lunchin", "lunchout"]:
+        loading_msg = await message.answer(f"⏳ Processing {action.upper().replace('IN', ' IN').replace('OUT', ' OUT')}...")
         
         if not bamboo_clock_in_out(s, action):
-            await message.answer(f"{my_info(user_id)}", parse_mode='HTML')
+            await loading_msg.edit_text(f"{my_info(user_id)}", parse_mode='HTML')
             await message.answer("❌ Failed to clock in/out in Bamboo HR. Check Bamboo HR Log in /my_info.", parse_mode='HTML')
             return
         
@@ -307,7 +312,7 @@ async def callback_action_handler(callback: CallbackQuery) -> None:
         
         await callback.answer(f"✅ {action.upper().replace('IN', ' IN').replace('OUT', ' OUT')} logged!", show_alert=False)
         
-        await message.answer(f"{my_info(user_id)}", parse_mode='HTML')
+        await loading_msg.edit_text(f"{my_info(user_id)}", parse_mode='HTML')
         await message.answer(f"✅ {action.upper().replace('IN', ' IN').replace('OUT', ' OUT')} successfully logged!", parse_mode='HTML')
         if not s.get('bamboo_phpsessid'):
             await message.answer(f"⚠️ Don't forget to do the same in <b>Bamboo HR</b>!", parse_mode='HTML')
@@ -322,19 +327,20 @@ async def command_action_handler(message: Message, command: CommandObject) -> No
     user_id = message.from_user.id
     cmd = command.command
     if cmd in ["dayin", "dayout", "lunchin", "lunchout"]:
+        loading_msg = await message.answer(f"⏳ Processing {cmd.upper().replace('IN', ' IN').replace('OUT', ' OUT')}...")
         # if datetime.fromisoformat(s.get('log', {}).get(cmd, '2000-01-01T09:00:00+00:00')).astimezone(ZoneInfo(s['timezone'])).strftime('%Y-%m-%d') == datetime.now(ZoneInfo(s['timezone'])).strftime('%Y-%m-%d'):
         #     await message.answer(f"{my_info(user_id)}", parse_mode='HTML')
         #     await message.answer(f"ℹ️ ✅ You've already clocked {cmd.upper()} today at <code>{datetime.fromisoformat(s.get('log', {}).get(cmd, '2000-01-01T09:00:00+00:00')).astimezone(ZoneInfo(s['timezone'])).strftime('%H:%M:%S')}</code>.", parse_mode='HTML')
         #     await message.answer(f"⚠️ Don't forget to do the same in <b>Bamboo HR</b>!", parse_mode='HTML')
         #     return
         if not bamboo_clock_in_out(s, cmd):
-            await message.answer(f"{my_info(user_id)}", parse_mode='HTML')
+            await loading_msg.edit_text(f"{my_info(user_id)}", parse_mode='HTML')
             await message.answer("❌ Failed to clock in/out in Bamboo HR. Check Bamboo HR Log in /my_info.", parse_mode='HTML')
             return
         s = json.load(open(f'subscribers/{user_id}.json'))
         s['log'][cmd] = datetime.now(timezone.utc).isoformat()
         json.dump(s, open(f'subscribers/{user_id}.json', "w"), indent=2, ensure_ascii=False)
-        await message.answer(f"{my_info(user_id)}", parse_mode='HTML')
+        await loading_msg.edit_text(f"{my_info(user_id)}", parse_mode='HTML')
         await message.answer(f"✅ {cmd.upper().replace('IN', ' IN').replace('OUT', ' OUT')} successfully logged!", parse_mode='HTML')
         if not s.get('bamboo_phpsessid'):
             await message.answer(f"⚠️ Don't forget to do the same in <b>Bamboo HR</b>!", parse_mode='HTML')
@@ -361,9 +367,10 @@ async def command_my_info_handler(message: Message) -> None:
         await message.answer("❌ You're not subscribed! Please subscribe first.")
         return
     
+    loading_msg = await message.answer("⏳ Loading your info...")
     update_bamboo_status(s)
     update_jira_status(s)
-    await message.answer(f"{my_info(user_id)}", parse_mode='HTML')
+    await loading_msg.edit_text(f"{my_info(user_id)}", parse_mode='HTML')
     
 @dp.message(Command("subscribe", "follow"))
 async def command_subscribe_handler(message: Message, state: FSMContext) -> None:
@@ -391,7 +398,7 @@ async def command_subscribe_handler(message: Message, state: FSMContext) -> None
 @dp.message(Command("set_timezone"))
 async def command_set_timezone_handler(message: Message, state: FSMContext) -> None:
     await state.set_state(SubscribeStates.waiting_for_timezone)
-    await message.answer("""
+    await message.answer(dedent("""
                 🌍 <b>Please set your timezone</b>
 
                 Enter your timezone in this format (tap to copy):
@@ -403,7 +410,10 @@ async def command_set_timezone_handler(message: Message, state: FSMContext) -> N
 
                 👉 You can find your exact timezone here: https://en.wikipedia.org/wiki/List_of_tz_database_time_zones
 
-                If you don’t set one, the bot will use UTC (London time, no DST).""".replace('                ','').strip(),
+                If you don’t set one, the bot will use UTC (London time, no DST).
+                
+                /cancel to abort.
+                """).strip(),
             parse_mode="HTML"
     )
     
@@ -441,6 +451,8 @@ async def command_set_bamboo_phpsessid_handler(message: Message, state: FSMConte
 
                     PHPSESSID looks like this:
                     <i>mThcCZD%2N5wGtGkCsCNb1h6YIt7ML3lW</i>
+                    
+                    /cancel to abort.
                     """.replace('                    ','').strip(), 
                     parse_mode="HTML"
     )
@@ -475,6 +487,8 @@ async def command_set_jira_credentials_handler(message: Message, state: FSMConte
                     <code>your_email,api_token</code>
                     
                     Use: https://id.atlassian.com/manage-profile/security/api-tokens to generate your API token.
+                    
+                    /cancel to abort.
                     """).strip(),
                     parse_mode="HTML"
     )
@@ -501,18 +515,28 @@ async def command_unset_jira_credentials_handler(message: Message, state: FSMCon
 
 @dp.message(Command("add_jira_worklog"))
 async def command_add_jira_worklog_handler(message: Message, state: FSMContext) -> None:
+    if not (s := subscriber(user_id := message.from_user.id)):
+        await message.answer("❌ You're not subscribed! Please subscribe first.")
+        return
     await state.set_state(SubscribeStates.waiting_for_jira_worklog)
-    await message.answer(dedent("""
-                    🐞 Please enter your Jira worklog in format:
-                    
-                    <code>issue_key,started_at,time_spent,comment</code>
-                    
-                    Example1:
-                    <code>KC-123,2025-12-31 09:00,85m,Worked on feature X</code>
-                    
-                    Example2 (date is today):
-                    <code>KC-123,09:00,1h 5m,Worked on feature X</code>
-                    """).strip(),
+    examples = []
+    examples.append(f"<code>KC-123,{datetime.now(ZoneInfo(s.get('timezone', 'UTC'))).strftime('%Y-%m-%d %H:%M')},45m,Worked on feature X</code>")
+    examples.append(f"<code>KC-456,{datetime.now(ZoneInfo(s.get('timezone', 'UTC'))).strftime('%H:%M')},1h 5m,Meeting with Alice & Bob</code> (note: date is today if not provided)")
+    for i, jira_status in enumerate(s.get('jira_status', [])[:4]):
+        fmt = '%H:%M'
+        examples.append(f"<code>{jira_status['issue_key']},{datetime.fromisoformat(jira_status['date']).astimezone(ZoneInfo(s.get('timezone', 'UTC'))).strftime(fmt)},{jira_status['time_spent']},{jira_status['comment']}</code>")
+    examples = '\n\n'.join(examples)
+    await message.answer(dedent(f"""
+                🐞 Please enter your Jira worklog in format:
+                
+                <code>issue_key,started_at,time_spent,comment</code>
+                
+                Examples (tap to copy):
+                
+                [examples]
+                
+                /cancel to abort.
+                    """).replace('[examples]', examples).strip(),
                     parse_mode="HTML"
     )
     
@@ -548,7 +572,7 @@ async def process_jira_worklog_handler(message: Message, state: FSMContext) -> N
 @dp.message(Command("set_daily_schedule"))
 async def command_set_daily_schedule_handler(message: Message, state: FSMContext) -> None:
     await state.set_state(SubscribeStates.waiting_for_daily_schedule)
-    await message.answer("""
+    await message.answer(dedent("""
                          
                     🕒 Please enter your daily schedule for a weekday.
 
@@ -565,7 +589,10 @@ async def command_set_daily_schedule_handler(message: Message, state: FSMContext
 
                     To delete a day: <code>-1</code> (removes Monday)
 
-                    Use /my_info to see your current schedule.""".replace('                    ','').strip(),
+                    Use /my_info to see your current schedule.
+                    
+                    /cancel to abort.
+                    """).strip(),
                     parse_mode="HTML"
     )
     
