@@ -88,6 +88,7 @@ class SubscribeStates(StatesGroup):
     waiting_for_bamboo_phpsessid = State()
     waiting_for_jira_credentials = State()
     waiting_for_jira_worklog = State()
+    waiting_for_pause_reminders = State()
 
 async def on_startup(bot: Bot):
     await bot.set_my_commands([
@@ -107,6 +108,8 @@ async def on_startup(bot: Bot):
         BotCommand(command="reset_day", description="Reset log for the day"),
         BotCommand(command="log", description="Show log for the day"),
         BotCommand(command="unsubscribe", description="Unsubscribe from reminders"),
+        BotCommand(command="pause_reminders", description="Pause reminders until specified date and time"),
+        BotCommand(command="resume_reminders", description="Resume reminders immediately"),
         BotCommand(command="cancel", description="Cancel the current action"),
     ])
 
@@ -172,6 +175,15 @@ def my_info_from_user_id(user_id: int) -> str:
     for i, v in enumerate(s.get('weekly_schedule', ['N/A']*7)):
         msg += f"<code>{v}</code> [{calendar.day_abbr[i]}]\n" if v else f"N/A [{calendar.day_abbr[i]}]\n"
     msg += f"\n🌍 Timezone: <code>{timezone}</code>\nUse /set_timezone to update\n"
+    if stop_until_str := s.get('pause_reminders'):
+        stop_until = datetime.fromisoformat(stop_until_str).astimezone(ZoneInfo(timezone))
+        now = datetime.now(ZoneInfo(timezone))
+        if now < stop_until:
+            msg += f"\n⏸️ Reminders paused until: <code>{stop_until.strftime('%Y-%m-%d %H:%M')}</code>\nUse /resume_reminders to resume immediately\n"
+        else:
+            msg += f"\n✅ Reminders active\n"
+    else:
+        msg += f"\n✅ Reminders active\n"
     if t := s.get('bamboo_phpsessid'):
         msg += f"\n🔐 Bamboo HR PHPSESSID:\n<code>{t[:5]}**{t[-5:]}</code>\nUse /unset_bamboo_phpsessid to unset\nUse /set_bamboo_phpsessid to update\n"
         msg += f"\nBamboo HR Log:\n"
@@ -687,6 +699,76 @@ async def process_password_handler(message: Message, state: FSMContext) -> None:
         await state.clear()
     else:
         await message.answer("❌ Incorrect password. Please try again or type /cancel to abort.")
+
+@dp.message(Command("pause_reminders"))
+async def command_pause_reminders_handler(message: Message, state: FSMContext) -> None:
+    if not (s := is_subscribed(user_id := message.from_user.id)):
+        await message.answer("❌ You're not subscribed! Please /subscribe first.")
+        return
+    await state.set_state(SubscribeStates.waiting_for_pause_reminders)
+    tz = s.get('timezone', 'UTC')
+    now = datetime.now(ZoneInfo(tz)) + timedelta(hours=24)
+    await message.answer(dedent(f"""
+                ⏸️ <b>Stop reminders until date and time</b>
+                
+                Enter datetime in one of these formats (tap to copy):
+                
+                Example: 
+                
+                <code>{now.strftime('%Y-%m-%d %H:%M')}</code>
+                
+                Reminders will be paused until the specified datetime.
+                
+                /cancel to abort.
+                """).strip(),
+            parse_mode="HTML"
+    )
+
+@dp.message(SubscribeStates.waiting_for_pause_reminders)
+async def process_pause_reminders_handler(message: Message, state: FSMContext) -> None:
+    await state.clear()
+    s = subscriber(user_id := message.from_user.id)
+    tz = ZoneInfo(s.get('timezone', 'UTC'))
+    datetime_str = message.text.strip()
+    
+    try:
+        # Try parsing as full datetime first (YYYY-MM-DD HH:MM)
+        if len(datetime_str) > 5:
+            # Parse as naive datetime and then make it timezone-aware
+            naive_dt = datetime.strptime(datetime_str, '%Y-%m-%d %H:%M')
+            stop_until = naive_dt.replace(tzinfo=tz)
+        else:
+            # Parse as time only (HH:MM) - use today's date
+            time_parts = datetime_str.split(':')
+            if len(time_parts) != 2:
+                raise ValueError("Invalid time format")
+            now = datetime.now(tz)
+            stop_until = now.replace(hour=int(time_parts[0]), minute=int(time_parts[1]), second=0, microsecond=0)
+            # If the time has already passed today, assume it's for tomorrow
+            if stop_until <= now:
+                stop_until += timedelta(days=1)
+    except Exception as e:
+        await message.answer(f"❌ Invalid datetime format. Please enter a valid datetime in format 'YYYY-MM-DD HH:MM' or 'HH:MM'. Error: {e}")
+        return
+    
+    s['pause_reminders'] = stop_until.isoformat()
+    json.dump(s, open(f'subscribers/{user_id}.json', "w"), indent=2, ensure_ascii=False)
+    await message.answer(f"✅ Reminders paused until {stop_until.strftime('%Y-%m-%d %H:%M')} ({tz.key})")
+    await message.answer(f"{my_info(user_id)}", parse_mode='HTML')
+
+@dp.message(Command("resume_reminders"))
+async def command_resume_reminders_handler(message: Message) -> None:
+    if not (s := is_subscribed(user_id := message.from_user.id)):
+        await message.answer("❌ You're not subscribed! Please /subscribe first.")
+        return
+    
+    if 'pause_reminders' in s:
+        del s['pause_reminders']
+        json.dump(s, open(f'subscribers/{user_id}.json', "w"), indent=2, ensure_ascii=False)
+        await message.answer("✅ Reminders resumed!")
+    else:
+        await message.answer("ℹ️ Reminders are already active.")
+    await message.answer(f"{my_info(user_id)}", parse_mode='HTML')
             
 bot = Bot(token=os.getenv("BOT_TOKEN"))
 
@@ -700,6 +782,19 @@ async def check_reminders_loop():
                     update_bamboo_status(s)
                     update_jira_status(s)
                     n = datetime.now(ZoneInfo(s.get('timezone', 'UTC')))
+                    
+                    # Check if reminders are paused
+                    if stop_until_str := s.get('pause_reminders'):
+                        stop_until = datetime.fromisoformat(stop_until_str).astimezone(ZoneInfo(s.get('timezone', 'UTC')))
+                        if n < stop_until:
+                            # Reminders are paused, skip this user
+                            continue
+                        else:
+                            # Pause period has passed, remove it
+                            if 'pause_reminders' in s:
+                                del s['pause_reminders']
+                                json.dump(s, open(f'subscribers/{f}', "w"), indent=2, ensure_ascii=False)
+                    
                     week_day = n.isoweekday()
                     past = n - timedelta(hours=48)
                     ymd, hm =  n.strftime('%Y-%m-%d'), n.strftime('%H:%M')
@@ -714,16 +809,16 @@ async def check_reminders_loop():
                     has_dayout = datetime.fromisoformat(log.get('dayout', past.isoformat())).astimezone(ZoneInfo(s.get('timezone', 'UTC'))).strftime('%Y-%m-%d') == ymd
                     message, action = None, None
                     if not has_dayin and hm >= target_day_in.strip().lower():
-                        message = await bot.send_message(s['id'], f"Reminder: {action_to_icon['dayin']} Day IN!", reply_markup=create_action_keyboard('dayin'))
+                        message = await bot.send_message(s['id'], f"Reminder: {action_to_icon['dayin']} Day IN! \n\n/pause_reminders", reply_markup=create_action_keyboard('dayin'))
                         action = 'dayin'
                     if has_dayin and not has_lunchout and hm >= target_lunch_out.strip().lower():
-                        message = await bot.send_message(s['id'], f"Reminder: {action_to_icon['lunchout']} Lunch OUT!", reply_markup=create_action_keyboard('lunchout'))
+                        message = await bot.send_message(s['id'], f"Reminder: {action_to_icon['lunchout']} Lunch OUT! \n\n/pause_reminders", reply_markup=create_action_keyboard('lunchout'))
                         action = 'lunchout'
                     if has_dayin and has_lunchout and not has_lunchin and lunchout + timedelta(hours=1) <= n:
-                        message = await bot.send_message(s['id'], f"Reminder: {action_to_icon['lunchin']} Lunch IN!", reply_markup=create_action_keyboard('lunchin'))
+                        message = await bot.send_message(s['id'], f"Reminder: {action_to_icon['lunchin']} Lunch IN! \n\n/pause_reminders", reply_markup=create_action_keyboard('lunchin'))
                         action = 'lunchin'
                     if has_dayin and has_lunchin and has_lunchout and not has_dayout and hm >= target_day_out.strip().lower():
-                        message = await bot.send_message(s['id'], f"Reminder: {action_to_icon['dayout']} Day OUT!", reply_markup=create_action_keyboard('dayout'))
+                        message = await bot.send_message(s['id'], f"Reminder: {action_to_icon['dayout']} Day OUT! \n\n/pause_reminders", reply_markup=create_action_keyboard('dayout'))
                         action = 'dayout'
                     if message and action:
                         if last_reminder_messages.get(f"{s['id']}") and last_reminder_messages[f"{s['id']}"].get('action') == action:
