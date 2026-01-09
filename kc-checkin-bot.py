@@ -72,6 +72,25 @@ action_to_icon = {
    "dayout": "🔚🚪",
 }
 
+def jira_seconds_to_workdays(total_seconds, hours_per_day=8):
+    total_hours = total_seconds / 3600
+    workdays = total_hours // hours_per_day
+    remaining_hours = total_hours % hours_per_day
+    remaining_minutes = (total_seconds % 3600) / 60
+
+    parts = []
+    if workdays > 0:
+        parts.append(f"{int(workdays)}d")
+    if remaining_hours > 0 or remaining_minutes > 0:
+        hrs = int(remaining_hours)
+        mins = int(remaining_minutes)
+        if hrs > 0:
+            parts.append(f"{hrs}h")
+        if mins > 0:
+            parts.append(f"{mins}m")
+    
+    return " ".join(parts) if parts else "0m"
+
 def create_action_keyboard(action: str) -> InlineKeyboardMarkup:
     """Create an inline keyboard with a button for the specified action"""
     button_text = f"{action_to_icon.get(action, '')} {action.upper().replace('IN', ' IN').replace('OUT', ' OUT')}"
@@ -169,7 +188,7 @@ def my_info_from_user_id(user_id: int) -> str:
     # msg += f"👤 <b>{message.from_user.full_name}</b>\n\n"
     msg += f"⏱️ Daily Log for: {datetime.now(ZoneInfo(timezone := s.get('timezone', 'UTC'))).strftime('%Y-%m-%d, %a')}:\n"
     for k, v in s['log'].items():
-        msg += f"  {action_to_icon[k.lower()]} {k.upper().replace('IN', ' IN').replace('OUT', ' OUT')} - <code>{datetime.fromisoformat(v).astimezone(ZoneInfo(timezone)).strftime('%H:%M:%S')}</code>\n" if v and datetime.fromisoformat(v).astimezone(ZoneInfo(timezone)).strftime('%Y-%m-%d') == datetime.now(ZoneInfo(timezone)).strftime('%Y-%m-%d') else f"  {action_to_icon[k.lower()]} {k.upper().replace('IN', ' IN').replace('OUT', ' OUT')} -\n"
+        msg += f"  {action_to_icon[k.lower()]} {k.upper().replace('IN', ' IN').replace('OUT', ' OUT')} (/{k.lower()}) - <code>{datetime.fromisoformat(v).astimezone(ZoneInfo(timezone)).strftime('%H:%M:%S')}</code>\n" if v and datetime.fromisoformat(v).astimezone(ZoneInfo(timezone)).strftime('%Y-%m-%d') == datetime.now(ZoneInfo(timezone)).strftime('%Y-%m-%d') else f"  {action_to_icon[k.lower()]} {k.upper().replace('IN', ' IN').replace('OUT', ' OUT')} (/{k.lower()}) -\n"
     msg += f"\n📅 Weekly schedule [/set_daily_schedule]:\n"
     msg += "[week_day,day_in,lunch_out,day_out]\n"
     for i, v in enumerate(s.get('weekly_schedule', ['N/A']*7)):
@@ -198,9 +217,17 @@ def my_info_from_user_id(user_id: int) -> str:
         jtoken = f"{jtoken[:5]}**{jtoken[-5:]}"
         j = f"{jemail},{jtoken}"
         msg += f"\n🐞 Jira Credentials:\n<code>{j}</code>\nUse /unset_jira_credentials to unset\nUse /set_jira_credentials to update\nUse /add_jira_worklog to add Jira worklog.\n"
-        msg += f"\n🐞 Worklog for 2 days (/add_jira_worklog):\n"
+        msg += f"\n🐞 Worklog for today (/add_jira_worklog):\n"
+        total_time_spent_seconds_today = 0
         for jira_status in s.get('jira_status') or []:
-            msg += f"    <code>{jira_status['issue_key']}</code> [{jira_status['time_spent']}]: {jira_status['comment']} [<i>{datetime.fromisoformat(jira_status['date']).astimezone(ZoneInfo(timezone)).strftime('%Y-%m-%d %H:%M')}</i>]\n"
+            if datetime.fromisoformat(jira_status['date']).astimezone(ZoneInfo(timezone)).strftime('%Y-%m-%d') == datetime.now(ZoneInfo(timezone)).strftime('%Y-%m-%d'):
+                msg += f"    <code>{jira_status['issue_key']}</code> [{jira_status['time_spent']}]: {jira_status['comment']} [<i>{datetime.fromisoformat(jira_status['date']).astimezone(ZoneInfo(timezone)).strftime('%H:%M')}</i>]\n"
+                total_time_spent_seconds_today += jira_status['time_spent_seconds']
+        msg += f"\n    Total time logged today: <b>{jira_seconds_to_workdays(total_time_spent_seconds_today)}</b>\n"
+        # for jira_status in s.get('jira_status') or []:
+        #     if datetime.fromisoformat(jira_status['date']).astimezone(ZoneInfo(timezone)).strftime('%Y-%m-%d') != datetime.now(ZoneInfo(timezone)).strftime('%Y-%m-%d'):
+        #         msg += f"    <code>{jira_status['issue_key']}</code> [{jira_status['time_spent']}]: {jira_status['comment']} [<i>{datetime.fromisoformat(jira_status['date']).astimezone(ZoneInfo(timezone)).strftime('%Y-%m-%d %H:%M')}</i>]\n"
+        
     else:
         msg += f"\n🐞 Jira credentials: N/A\nuse /set_jira_credentials to set\n"
     msg += f"\nℹ️ Use /my_info to show your info."
@@ -287,10 +314,11 @@ def update_jira_status(user: dict):
                 for wl in sorted(jira.worklogs(issue.key) or [], key=lambda w: w.started or w.created, reverse=True):
                     d = datetime.fromisoformat(wl.started or wl.created).astimezone(tz)
                     if d.date() >= datetime.now().astimezone(tz).date() - timedelta(days=2):
-                        if wl.raw['author'].get('emailAddress', '').lower() == jemail.strip().lower():
+                        if wl.raw['author'].get('emailAddress', '').lower() == jemail.strip().lower() and (wl.timeSpent or "0m") != "0m":
                             jira_status.append({
                                 "issue_key": issue.key,
                                 "time_spent": wl.timeSpent or "0m",
+                                "time_spent_seconds": wl.timeSpentSeconds or 0,
                                 "comment": wl.raw.get('comment', '').strip(),
                                 "date": d.isoformat(),
                             })
@@ -547,7 +575,13 @@ async def command_add_jira_worklog_handler(message: Message, state: FSMContext) 
     examples = []
     examples.append(f"<code>KC-123,{datetime.now(ZoneInfo(s.get('timezone', 'UTC'))).strftime('%Y-%m-%d %H:%M')},45m,Worked on feature X</code>")
     examples.append(f"<code>KC-456,{datetime.now(ZoneInfo(s.get('timezone', 'UTC'))).strftime('%H:%M')},1h 5m,Meeting with Alice & Bob</code> (note: date is today if not provided)")
-    for i, jira_status in enumerate((s.get('jira_status') or [])[:4]):
+    seen_issues = set()
+    for i, jira_status in enumerate((s.get('jira_status') or [])):
+        if jira_status['issue_key'] in seen_issues:
+            continue
+        seen_issues.add(jira_status['issue_key'])
+        if len(examples) >= 6:
+            break
         fmt = '%H:%M'
         examples.append(f"<code>{jira_status['issue_key']},{datetime.fromisoformat(jira_status['date']).astimezone(ZoneInfo(s.get('timezone', 'UTC'))).strftime(fmt)},{jira_status['time_spent']},{jira_status['comment']}</code>")
     examples = '\n\n'.join(examples)
