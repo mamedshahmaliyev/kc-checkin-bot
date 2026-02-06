@@ -200,9 +200,9 @@ def my_info_from_user_id(user_id: int) -> str:
         if now < stop_until:
             msg += f"\n⏸️ Reminders paused until: <code>{stop_until.strftime('%Y-%m-%d %H:%M')}</code>\nUse /resume_reminders to resume immediately\n"
         else:
-            msg += f"\n✅ Reminders active\n"
+            msg += f"\n✅ Reminders active (/pause_reminders)\n"
     else:
-        msg += f"\n✅ Reminders active\n"
+        msg += f"\n✅ Reminders active (/pause_reminders)\n"
     if t := s.get('bamboo_phpsessid'):
         msg += f"\n🔐 Bamboo HR PHPSESSID:\n<code>{t[:5]}**{t[-5:]}</code>\nUse /unset_bamboo_phpsessid to unset\nUse /set_bamboo_phpsessid to update\n"
         msg += f"\nBamboo HR Log:\n"
