@@ -285,15 +285,20 @@ def update_bamboo_status(user: dict):
         json.dump(user, open(f'subscribers/{user['id']}.json', "w"), indent=2, ensure_ascii=False)
         
 def bamboo_clock_in_out(user: dict, action: str) -> bool:
-    if t := user.get('bamboo_phpsessid'):
-        s = requests.Session()
-        s.cookies.update({"PHPSESSID": t})
-        csrf_token = re.search(r'var\s+CSRF_TOKEN\s*=\s*"([a-f0-9]{128})"', s.get("https://knowledgecity.bamboohr.com/home").text).group(1)
-        in_out = "in" if action.lower().endswith("in") else "out"
-        employee_id = user.get('bamboo_status', {}).get('employeeId')
-        r = s.post(f"https://knowledgecity.bamboohr.com/timesheet/clock/{in_out}/{employee_id}", headers={"x-csrf-token": csrf_token})
-        update_bamboo_status(user)
-        return r.status_code == 200
+    try:
+        if t := user.get('bamboo_phpsessid'):
+            s = requests.Session()
+            s.cookies.update({"PHPSESSID": t})
+            csrf_token = re.search(r'var\s+CSRF_TOKEN\s*=\s*"([a-f0-9]{128})"', s.get("https://knowledgecity.bamboohr.com/home").text).group(1)
+            in_out = "in" if action.lower().endswith("in") else "out"
+            employee_id = user.get('bamboo_status', {}).get('employeeId')
+            r = s.post(f"https://knowledgecity.bamboohr.com/timesheet/clock/{in_out}/{employee_id}", headers={"x-csrf-token": csrf_token})
+            update_bamboo_status(user)
+            return r.status_code == 200
+    except Exception as e:
+        user['bamboo_status'] = {'error': f"Error clocking in/out in Bamboo HR: {e}"}
+        json.dump(user, open(f'subscribers/{user['id']}.json', "w"), indent=2, ensure_ascii=False)
+        return False
     return True
   
 def get_jira_credentials(user: dict) -> tuple[str, str]:
