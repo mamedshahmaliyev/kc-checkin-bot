@@ -1,4 +1,4 @@
-import os, dotenv, requests, re, traceback
+import os, dotenv, requests, re, traceback, time
 from zoneinfo import ZoneInfo
 dotenv.load_dotenv(override=True)
 from textwrap import dedent
@@ -90,6 +90,84 @@ def jira_seconds_to_workdays(total_seconds, hours_per_day=8):
             parts.append(f"{mins}m")
     
     return " ".join(parts) if parts else "0m"
+
+def action_label(action: str) -> str:
+    return action.upper().replace('IN', ' IN').replace('OUT', ' OUT')
+
+PROGRESS_FRAMES = ["✳️", "✶", "✻", "✽", "✺"]
+DEFAULT_PROGRESS_VERBS = ["Processing", "Thinking", "Working", "Crunching", "Syncing", "Finalizing"]
+CLOCK_PROGRESS_VERBS = ["Processing", "Contacting Bamboo HR", "Clocking", "Thinking", "Syncing log", "Finalizing"]
+INFO_PROGRESS_VERBS = ["Loading", "Fetching Bamboo HR", "Fetching Jira worklogs", "Thinking", "Assembling", "Finalizing"]
+WORKLOG_PROGRESS_VERBS = ["Processing", "Contacting Jira", "Logging work", "Thinking", "Refreshing worklogs", "Finalizing"]
+
+class Progress:
+    """A Claude-style animated 'in progress' message.
+
+    Posts a placeholder immediately, then rotates verb + icon every `interval`
+    seconds while the blocking work runs in a worker thread. On exit the
+    message is either deleted (default) or replaced with the final text.
+    """
+
+    def __init__(self, target: Message, verbs: list[str] = None, interval: float = 3.0, suffix: str = ""):
+        self.target = target
+        self.verbs = verbs or DEFAULT_PROGRESS_VERBS
+        self.interval = interval
+        self.suffix = suffix
+        self.msg: Message | None = None
+        self._task: asyncio.Task | None = None
+        self._started = 0.0
+        self._tick = 0
+
+    def _text(self) -> str:
+        text = f"{PROGRESS_FRAMES[self._tick % len(PROGRESS_FRAMES)]} <i>{self.verbs[self._tick % len(self.verbs)]}…</i>"
+        if self.suffix:
+            text += f" {self.suffix}"
+        if elapsed := int(time.monotonic() - self._started):
+            text += f" <code>({elapsed}s)</code>"
+        return text
+
+    async def _animate(self) -> None:
+        while True:
+            await asyncio.sleep(self.interval)
+            self._tick += 1
+            try:
+                await self.msg.edit_text(self._text(), parse_mode='HTML')
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                pass  # rate limit / message gone / not modified — keep animating
+
+    async def __aenter__(self) -> "Progress":
+        self._started = time.monotonic()
+        self.msg = await self.target.answer(self._text(), parse_mode='HTML')
+        self._task = asyncio.create_task(self._animate())
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb) -> bool:
+        await self.stop()
+        return False
+
+    async def stop(self, final_text: str = None) -> None:
+        """Stop animating: delete the progress message, or edit it into `final_text`."""
+        if self._task and not self._task.done():
+            self._task.cancel()
+            try:
+                await self._task
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                pass
+        self._task = None
+        if not self.msg:
+            return
+        try:
+            if final_text is None:
+                await self.msg.delete()
+            else:
+                await self.msg.edit_text(final_text, parse_mode='HTML')
+        except Exception:
+            pass  # message already deleted / too old to edit
+        self.msg = None
 
 def create_action_keyboard(action: str) -> InlineKeyboardMarkup:
     """Create an inline keyboard with a button for the specified action"""
@@ -333,37 +411,60 @@ def update_jira_status(user: dict):
         json.dump(user, open(f'subscribers/{user['id']}.json', "w"), indent=2, ensure_ascii=False)
    
             
+running_actions: set[int] = set()
+
+async def perform_clock_action(target: Message, user_id: int, action: str) -> None:
+    """Clock in/out, keeping the event loop free and showing animated progress."""
+    label = action_label(action)
+    async with Progress(target, verbs=CLOCK_PROGRESS_VERBS, suffix=f"<b>{label}</b>") as progress:
+        s = subscriber(user_id)
+        if not await asyncio.to_thread(bamboo_clock_in_out, s, action):
+            await progress.stop()
+            await target.answer(f"{my_info(user_id)}", parse_mode='HTML')
+            await target.answer("❌ Failed to clock in/out in Bamboo HR. Check Bamboo HR Log in /my_info.", parse_mode='HTML')
+            return
+
+        s = subscriber(user_id)
+        s['log'][action] = datetime.now(timezone.utc).isoformat()
+        json.dump(s, open(f'subscribers/{user_id}.json', "w"), indent=2, ensure_ascii=False)
+
+        await progress.stop()
+        await target.answer(f"{my_info(user_id)}", parse_mode='HTML')
+        await target.answer(f"✅ {label} successfully logged!", parse_mode='HTML')
+        if not s.get('bamboo_phpsessid'):
+            await target.answer(f"⚠️ Don't forget to do the same in <b>Bamboo HR</b>!", parse_mode='HTML')
+
 @dp.callback_query(lambda c: c.data and c.data.startswith("action_"))
 async def callback_action_handler(callback: CallbackQuery) -> None:
     """Handle inline button clicks for actions"""
     user_id = callback.from_user.id
     message = callback.message
-    if not (s := is_subscribed(user_id)):
+    action = callback.data.replace("action_", "")
+
+    if action not in ["dayin", "dayout", "lunchin", "lunchout"]:
+        await callback.answer("❌ Invalid action.", show_alert=True)
+        return
+    if not is_subscribed(user_id):
+        await callback.answer("❌ You're not subscribed!", show_alert=True)
         await message.answer("❌ You're not subscribed! Please subscribe first using /subscribe.")
         return
-    
-    action = callback.data.replace("action_", "")
-    if action in ["dayin", "dayout", "lunchin", "lunchout"]:
-        loading_msg = await message.answer(f"⏳ Processing {action.upper().replace('IN', ' IN').replace('OUT', ' OUT')}...")
-        
-        if not bamboo_clock_in_out(s, action):
-            await loading_msg.edit_text(f"{my_info(user_id)}", parse_mode='HTML')
-            await message.answer("❌ Failed to clock in/out in Bamboo HR. Check Bamboo HR Log in /my_info.", parse_mode='HTML')
-            return
-        
-        s = json.load(open(f'subscribers/{user_id}.json'))
-        s['log'][action] = datetime.now(timezone.utc).isoformat()
-        json.dump(s, open(f'subscribers/{user_id}.json', "w"), indent=2, ensure_ascii=False)
-        
-        await callback.answer(f"✅ {action.upper().replace('IN', ' IN').replace('OUT', ' OUT')} logged!", show_alert=False)
-        
-        await loading_msg.edit_text(f"{my_info(user_id)}", parse_mode='HTML')
-        await message.answer(f"✅ {action.upper().replace('IN', ' IN').replace('OUT', ' OUT')} successfully logged!", parse_mode='HTML')
-        if not s.get('bamboo_phpsessid'):
-            await message.answer(f"⚠️ Don't forget to do the same in <b>Bamboo HR</b>!", parse_mode='HTML')
-    else:
-        await callback.answer("❌ Invalid action.", show_alert=True)
-        
+    if user_id in running_actions:
+        await callback.answer("⏳ Your previous action is still in progress…", show_alert=False)
+        return
+
+    # Ack right away so Telegram stops showing the button as loading
+    await callback.answer(f"⏳ {action_label(action)} in progress…", show_alert=False)
+    try:
+        await message.edit_reply_markup(reply_markup=None)
+    except Exception:
+        pass  # keyboard already gone / message too old to edit
+
+    running_actions.add(user_id)
+    try:
+        await perform_clock_action(message, user_id, action)
+    finally:
+        running_actions.discard(user_id)
+
 @dp.message(Command("dayin", "dayout", "lunchin", "lunchout", "log"))
 async def command_action_handler(message: Message, command: CommandObject) -> None:
     if not (s := is_subscribed(user_id := message.from_user.id)):
@@ -372,23 +473,14 @@ async def command_action_handler(message: Message, command: CommandObject) -> No
     user_id = message.from_user.id
     cmd = command.command
     if cmd in ["dayin", "dayout", "lunchin", "lunchout"]:
-        loading_msg = await message.answer(f"⏳ Processing {cmd.upper().replace('IN', ' IN').replace('OUT', ' OUT')}...")
-        # if datetime.fromisoformat(s.get('log', {}).get(cmd, '2000-01-01T09:00:00+00:00')).astimezone(ZoneInfo(s['timezone'])).strftime('%Y-%m-%d') == datetime.now(ZoneInfo(s['timezone'])).strftime('%Y-%m-%d'):
-        #     await message.answer(f"{my_info(user_id)}", parse_mode='HTML')
-        #     await message.answer(f"ℹ️ ✅ You've already clocked {cmd.upper()} today at <code>{datetime.fromisoformat(s.get('log', {}).get(cmd, '2000-01-01T09:00:00+00:00')).astimezone(ZoneInfo(s['timezone'])).strftime('%H:%M:%S')}</code>.", parse_mode='HTML')
-        #     await message.answer(f"⚠️ Don't forget to do the same in <b>Bamboo HR</b>!", parse_mode='HTML')
-        #     return
-        if not bamboo_clock_in_out(s, cmd):
-            await loading_msg.edit_text(f"{my_info(user_id)}", parse_mode='HTML')
-            await message.answer("❌ Failed to clock in/out in Bamboo HR. Check Bamboo HR Log in /my_info.", parse_mode='HTML')
+        if user_id in running_actions:
+            await message.answer("⏳ Your previous action is still in progress…")
             return
-        s = json.load(open(f'subscribers/{user_id}.json'))
-        s['log'][cmd] = datetime.now(timezone.utc).isoformat()
-        json.dump(s, open(f'subscribers/{user_id}.json', "w"), indent=2, ensure_ascii=False)
-        await loading_msg.edit_text(f"{my_info(user_id)}", parse_mode='HTML')
-        await message.answer(f"✅ {cmd.upper().replace('IN', ' IN').replace('OUT', ' OUT')} successfully logged!", parse_mode='HTML')
-        if not s.get('bamboo_phpsessid'):
-            await message.answer(f"⚠️ Don't forget to do the same in <b>Bamboo HR</b>!", parse_mode='HTML')
+        running_actions.add(user_id)
+        try:
+            await perform_clock_action(message, user_id, cmd)
+        finally:
+            running_actions.discard(user_id)
         return
     await message.answer(f"{my_info(user_id)}", parse_mode='HTML')
     
@@ -412,10 +504,10 @@ async def command_my_info_handler(message: Message) -> None:
         await message.answer("❌ You're not subscribed! Please /subscribe first.")
         return
     
-    loading_msg = await message.answer("⏳ Loading your info...")
-    update_bamboo_status(s)
-    update_jira_status(s)
-    await loading_msg.edit_text(f"{my_info(user_id)}", parse_mode='HTML')
+    async with Progress(message, verbs=INFO_PROGRESS_VERBS) as progress:
+        await asyncio.to_thread(update_bamboo_status, s)
+        await asyncio.to_thread(update_jira_status, s)
+        await progress.stop(f"{my_info(user_id)}")
     
 @dp.message(Command("subscribe", "follow"))
 async def command_subscribe_handler(message: Message, state: FSMContext) -> None:
@@ -627,11 +719,21 @@ async def process_jira_worklog_handler(message: Message, state: FSMContext) -> N
     except Exception as e:
         await message.answer(f"❌ Invalid started at format. Please enter a valid started at in the format yyyy-mm-dd hh:mm or in hh:mm format (e.g: 09:00). {e}")
         return
-    jira = JIRA(options={'server': os.getenv('JIRA_SERVER')}, basic_auth=tuple(jira_credentials))
-    jira.add_worklog(issue=issue_id, started=started_at, timeSpent=time_spent, comment=comment)
-    update_jira_status(subscriber(user_id))
-    await message.answer(f"{my_info(user_id)}", parse_mode='HTML')
-    await message.answer(f"✅ Jira worklog added successfully!")
+    def add_worklog():
+        jira = JIRA(options={'server': os.getenv('JIRA_SERVER')}, basic_auth=tuple(jira_credentials))
+        jira.add_worklog(issue=issue_id, started=started_at, timeSpent=time_spent, comment=comment)
+        update_jira_status(subscriber(user_id))
+
+    async with Progress(message, verbs=WORKLOG_PROGRESS_VERBS, suffix=f"<b>{issue_id}</b>") as progress:
+        try:
+            await asyncio.to_thread(add_worklog)
+        except Exception as e:
+            await progress.stop()
+            await message.answer(f"❌ Failed to add Jira worklog: {e}")
+            return
+        await progress.stop()
+        await message.answer(f"{my_info(user_id)}", parse_mode='HTML')
+        await message.answer(f"✅ Jira worklog added successfully!")
    
 @dp.message(Command("set_daily_schedule"))
 async def command_set_daily_schedule_handler(message: Message, state: FSMContext) -> None:
@@ -818,8 +920,8 @@ async def check_reminders_loop():
             if f.endswith('.json'):
                 try:
                     s = json.load(open(f'subscribers/{f}'))
-                    update_bamboo_status(s)
-                    update_jira_status(s)
+                    await asyncio.to_thread(update_bamboo_status, s)
+                    await asyncio.to_thread(update_jira_status, s)
                     n = datetime.now(ZoneInfo(s.get('timezone', 'UTC')))
                     
                     # Check if reminders are paused
