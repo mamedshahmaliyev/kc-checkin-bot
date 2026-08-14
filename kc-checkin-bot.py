@@ -72,6 +72,17 @@ action_to_icon = {
    "dayout": "🔚🚪",
 }
 
+# Order the clock actions happen in — Bamboo's clock events map onto this list.
+ACTION_ORDER = ["dayin", "lunchout", "lunchin", "dayout"]
+
+# Sentinel timestamps meaning "not done today".
+DEFAULT_LOG = {
+    "dayin": "2000-01-01T09:00:00+00:00",
+    "lunchout": "2000-01-01T13:00:00+00:00",
+    "lunchin": "2000-01-01T14:00:00+00:00",
+    "dayout": "2000-01-01T20:30:00+00:00"
+}
+
 def jira_seconds_to_workdays(total_seconds, hours_per_day=8):
     total_hours = total_seconds / 3600
     workdays = total_hours // hours_per_day
@@ -225,12 +236,7 @@ def subscribe(message: Message):
             'username': message.from_user.username,
             'first_name': message.from_user.first_name,
             'last_name': message.from_user.last_name,
-            "log": {
-                "dayin": "2000-01-01T09:00:00+00:00",
-                "lunchout": "2000-01-01T13:00:00+00:00",
-                "lunchin": "2000-01-01T14:00:00+00:00",
-                "dayout": "2000-01-01T20:30:00+00:00"
-            },
+            "log": dict(DEFAULT_LOG),
             "timezone": "UTC",
             "weekly_schedule": [
                 "N/A",
@@ -379,6 +385,79 @@ def bamboo_clock_in_out(user: dict, action: str) -> bool:
         return False
     return True
   
+def parse_bamboo_datetime(value: str, tz: ZoneInfo) -> datetime | None:
+    """Parse a naive Bamboo timestamp ('2026-08-14 09:03:00') as local time in `tz`."""
+    try:
+        return datetime.fromisoformat(value.strip()).replace(tzinfo=tz)
+    except Exception:
+        return None
+
+def bamboo_today_clock_entries(user: dict) -> list[tuple[datetime, datetime | None]] | None:
+    """Today's Bamboo clock entries as (clock_in, clock_out|None), oldest first.
+
+    Returns None when Bamboo can't answer for this user — not enabled, session
+    expired, or the day is tracked with manual hour entries instead of the clock.
+    """
+    status = user.get('bamboo_status') or {}
+    if not user.get('bamboo_phpsessid') or status.get('error') or not status.get('employeeId'):
+        return None
+    entries = status.get('clockEntries') or []
+    if not entries and (status.get('hourEntries') or []):
+        return None
+    default_tz = (status.get('today') or {}).get('timezone') or user.get('timezone', 'UTC')
+    pairs = []
+    for entry in entries:
+        tz_name = entry.get('timezone') or default_tz
+        tz = ZoneInfo(tz_name) if is_valid_timezone(tz_name) else ZoneInfo('UTC')
+        start = parse_bamboo_datetime(entry.get('start') or '', tz)
+        if not start or start.date() != datetime.now(tz).date():
+            continue
+        pairs.append((start, parse_bamboo_datetime(entry.get('end') or '', tz)))
+    pairs.sort(key=lambda p: p[0])
+    return pairs
+
+def logged_today(log: dict, action: str, tz: ZoneInfo) -> bool:
+    v = log.get(action)
+    return bool(v) and datetime.fromisoformat(v).astimezone(tz).date() == datetime.now(tz).date()
+
+def sync_log_with_bamboo(user: dict, clear_missing: bool = True) -> bool:
+    """Bring the local daily log in line with today's Bamboo clock entries.
+
+    When Bamboo is enabled it is the source of truth: its clock events, in order,
+    are DAY IN → LUNCH OUT → LUNCH IN → DAY OUT. This picks up actions that
+    reached Bamboo but never made it into the local log (so the bot stops asking
+    for them) and, with `clear_missing`, drops local actions Bamboo doesn't know
+    about. Pass clear_missing=False right after clocking, where a not-yet-refreshed
+    Bamboo response shouldn't wipe what we just recorded.
+
+    Returns True if the local log changed (the subscriber file is rewritten).
+    """
+    pairs = bamboo_today_clock_entries(user)
+    if pairs is None:
+        return False
+    events = [dt for pair in pairs for dt in pair if dt]
+    tz = ZoneInfo(user['timezone']) if is_valid_timezone(user.get('timezone')) else ZoneInfo('UTC')
+    log = dict(user.get('log') or {})
+    base = dict(DEFAULT_LOG) if clear_missing else dict(log)
+    synced = dict(base)
+
+    for action, dt in zip(ACTION_ORDER[:3], events):
+        synced[action] = dt.astimezone(timezone.utc).isoformat()
+    if len(events) >= 4 and pairs[-1][1]:
+        synced['dayout'] = events[-1].astimezone(timezone.utc).isoformat()
+    # One closed entry is ambiguous — a lunch break for most people, the whole day
+    # for anyone who doesn't clock out for lunch. Only the local log can tell us.
+    if len(events) == 2 and logged_today(log, 'dayout', tz) and not logged_today(log, 'lunchout', tz):
+        synced['lunchout'] = base.get('lunchout', DEFAULT_LOG['lunchout'])
+        synced['dayout'] = events[1].astimezone(timezone.utc).isoformat()
+
+    if synced == log:
+        return False
+    user['log'] = synced
+    json.dump(user, open(f'subscribers/{user['id']}.json', "w"), indent=2, ensure_ascii=False)
+    logger.info(f"Synced daily log with Bamboo HR for {user.get('username')} ({user['id']}): {json.dumps(synced)}")
+    return True
+
 def get_jira_credentials(user: dict) -> tuple[str, str]:
     if j := user.get('jira_credentials'):
         return [j.split(',')[0].strip(), j.split(',')[1].strip()]
@@ -426,6 +505,7 @@ async def perform_clock_action(target: Message, user_id: int, action: str) -> No
 
         s = subscriber(user_id)
         s['log'][action] = datetime.now(timezone.utc).isoformat()
+        sync_log_with_bamboo(s, clear_missing=False)
         json.dump(s, open(f'subscribers/{user_id}.json', "w"), indent=2, ensure_ascii=False)
 
         await progress.stop()
@@ -488,12 +568,7 @@ async def command_action_handler(message: Message, command: CommandObject) -> No
 async def command_reset_day_handler(message: Message) -> None:
     user_id = message.from_user.id
     s = subscriber(user_id)
-    s['log'] = {
-        "dayin": "2000-01-01T09:00:00+00:00",
-        "lunchout": "2000-01-01T13:00:00+00:00",
-        "lunchin": "2000-01-01T14:00:00+00:00",
-        "dayout": "2000-01-01T20:30:00+00:00"
-    }
+    s['log'] = dict(DEFAULT_LOG)
     json.dump(s, open(f'subscribers/{message.from_user.id}.json', "w"), indent=2, ensure_ascii=False)
     await message.answer(f"✅ Daily log reseted!")
     await message.answer(f"{my_info(user_id)}", parse_mode='HTML')
@@ -506,6 +581,7 @@ async def command_my_info_handler(message: Message) -> None:
     
     async with Progress(message, verbs=INFO_PROGRESS_VERBS) as progress:
         await asyncio.to_thread(update_bamboo_status, s)
+        sync_log_with_bamboo(s)
         await asyncio.to_thread(update_jira_status, s)
         await progress.stop(f"{my_info(user_id)}")
     
@@ -921,6 +997,7 @@ async def check_reminders_loop():
                 try:
                     s = json.load(open(f'subscribers/{f}'))
                     await asyncio.to_thread(update_bamboo_status, s)
+                    sync_log_with_bamboo(s)
                     await asyncio.to_thread(update_jira_status, s)
                     n = datetime.now(ZoneInfo(s.get('timezone', 'UTC')))
                     
