@@ -1,4 +1,5 @@
 import os, dotenv, requests, re, traceback, time
+from html import escape as esc  # escape untrusted text before embedding it in parse_mode='HTML' messages
 from zoneinfo import ZoneInfo
 dotenv.load_dotenv(override=True)
 from textwrap import dedent
@@ -252,6 +253,23 @@ def subscribe(message: Message):
 def subscriber(user_id) -> dict:
     return json.load(open(f'subscribers/{user_id}.json')) if os.path.exists(f'subscribers/{user_id}.json') else None
 
+TELEGRAM_MESSAGE_LIMIT = 4096
+WORKLOG_COMMENT_LIMIT = 120  # Jira worklog comments run to thousands of chars; keep them to one readable line
+
+def clip(text: str, limit: int = WORKLOG_COMMENT_LIMIT) -> str:
+    """Collapse free-form text (Jira comments) to a single short line so it can't blow the message limit."""
+    text = ' '.join(str(text or '').split())
+    return text if len(text) <= limit else f"{text[:limit].rstrip()}…"
+
+def fit_telegram(msg: str) -> str:
+    """Last-resort guard: drop trailing lines until the message fits. Safe because each line closes its own tags."""
+    if len(msg) <= TELEGRAM_MESSAGE_LIMIT:
+        return msg
+    lines = msg.split('\n')
+    while lines and len('\n'.join(lines)) > TELEGRAM_MESSAGE_LIMIT - 20:
+        lines.pop()
+    return '\n'.join(lines).rstrip() + '\n…(truncated)'
+
 def my_info(user_id) -> str:
     s = subscriber(user_id)
     return my_info_from_user_id(user_id)
@@ -291,7 +309,7 @@ def my_info_from_user_id(user_id: int) -> str:
         msg += f"\n🔐 Bamboo HR PHPSESSID:\n<code>{t[:5]}**{t[-5:]}</code>\nUse /unset_bamboo_phpsessid to unset\nUse /set_bamboo_phpsessid to update\n"
         msg += f"\nBamboo HR Log:\n"
         if err := s.get('bamboo_status', {}).get('error'):
-            msg += f" ❗{err}\n"
+            msg += f" ❗{esc(str(err))}\n"
         for log in s.get('bamboo_status', {}).get('clockEntries', []):
             msg += f"  {log.get('start').split(' ')[1]} -> {log.get('end').split(' ')[1] if log.get('end') else 'now'}, {date_diff_in_hhmm(log.get('start'), log.get('end') or datetime.now(ZoneInfo(timezone)).strftime('%Y-%m-%d %H:%M:%S'))}\n"
     else:
@@ -305,8 +323,8 @@ def my_info_from_user_id(user_id: int) -> str:
         total_time_spent_seconds_today = 0
         for jira_status in s.get('jira_status') or []:
             if datetime.fromisoformat(jira_status['date']).astimezone(ZoneInfo(timezone)).strftime('%Y-%m-%d') == datetime.now(ZoneInfo(timezone)).strftime('%Y-%m-%d'):
-                msg += f"    <code>{jira_status['issue_key']}</code> [{jira_status['time_spent']}]: {jira_status['comment']} [<i>{datetime.fromisoformat(jira_status['date']).astimezone(ZoneInfo(timezone)).strftime('%H:%M')}</i>]\n"
-                total_time_spent_seconds_today += jira_status['time_spent_seconds']
+                msg += f"    <code>{esc(jira_status.get('issue_key', 'N/A'))}</code> [{esc(jira_status.get('time_spent', '0m'))}]: {esc(clip(jira_status.get('comment', '')))} [<i>{datetime.fromisoformat(jira_status['date']).astimezone(ZoneInfo(timezone)).strftime('%H:%M')}</i>]\n"
+                total_time_spent_seconds_today += jira_status.get('time_spent_seconds', 0)
         msg += f"\n    Total time logged today: <b>{jira_seconds_to_workdays(total_time_spent_seconds_today)}</b>\n"
         # for jira_status in s.get('jira_status') or []:
         #     if datetime.fromisoformat(jira_status['date']).astimezone(ZoneInfo(timezone)).strftime('%Y-%m-%d') != datetime.now(ZoneInfo(timezone)).strftime('%Y-%m-%d'):
@@ -315,8 +333,8 @@ def my_info_from_user_id(user_id: int) -> str:
     else:
         msg += f"\n🐞 Jira credentials: N/A\nuse /set_jira_credentials to set\n"
     msg += f"\nℹ️ Use /my_info to show your info."
-    
-    return msg.strip()
+
+    return fit_telegram(msg.strip())
 
 @dp.message(Command("start"))
 async def command_start_handler(message: Message) -> None:
@@ -747,30 +765,34 @@ async def command_add_jira_worklog_handler(message: Message, state: FSMContext) 
     await state.set_state(SubscribeStates.waiting_for_jira_worklog)
     examples = []
     examples.append(f"<code>KC-123,{datetime.now(ZoneInfo(s.get('timezone', 'UTC'))).strftime('%Y-%m-%d %H:%M')},45m,Worked on feature X</code>")
-    examples.append(f"<code>KC-456,{datetime.now(ZoneInfo(s.get('timezone', 'UTC'))).strftime('%H:%M')},1h 5m,Meeting with Alice & Bob</code> (note: date is today if not provided)")
+    examples.append(f"<code>KC-456,{datetime.now(ZoneInfo(s.get('timezone', 'UTC'))).strftime('%H:%M')},1h 5m,Meeting with Alice &amp; Bob</code> (note: date is today if not provided)")
     seen_issues = set()
     for i, jira_status in enumerate((s.get('jira_status') or [])):
-        if jira_status['issue_key'] in seen_issues:
+        if not jira_status.get('issue_key') or jira_status['issue_key'] in seen_issues:
             continue
         seen_issues.add(jira_status['issue_key'])
         if len(examples) >= 6:
             break
         fmt = '%H:%M'
-        examples.append(f"<code>{jira_status['issue_key']},{datetime.fromisoformat(jira_status['date']).astimezone(ZoneInfo(s.get('timezone', 'UTC'))).strftime(fmt)},{jira_status['time_spent']},{jira_status['comment']}</code>")
-    examples = '\n\n'.join(examples)
-    await message.answer(dedent(f"""
+        examples.append(f"<code>{esc(jira_status['issue_key'])},{datetime.fromisoformat(jira_status['date']).astimezone(ZoneInfo(s.get('timezone', 'UTC'))).strftime(fmt)},{esc(clip(jira_status.get('time_spent', '0m')))},{esc(clip(jira_status.get('comment', '')))}</code>")
+
+    def render(items: list[str]) -> str:
+        return dedent(f"""
                 🐞 Please enter your Jira worklog in format:
-                
+
                 <code>issue_key,started_at,time_spent,comment</code>
-                
+
                 Examples (tap to copy):
-                
+
                 [examples]
-                
+
                 /cancel to abort.
-                    """).replace('[examples]', examples).strip(),
-                    parse_mode="HTML"
-    )
+                    """).replace('[examples]', '\n\n'.join(items)).strip()
+
+    # Keep the two hand-written examples; drop recycled ones until the message fits Telegram's limit.
+    while len(text := render(examples)) > TELEGRAM_MESSAGE_LIMIT and len(examples) > 2:
+        examples.pop()
+    await message.answer(text, parse_mode="HTML")
     
 @dp.message(SubscribeStates.waiting_for_jira_worklog)
 async def process_jira_worklog_handler(message: Message, state: FSMContext) -> None:
@@ -800,7 +822,7 @@ async def process_jira_worklog_handler(message: Message, state: FSMContext) -> N
         jira.add_worklog(issue=issue_id, started=started_at, timeSpent=time_spent, comment=comment)
         update_jira_status(subscriber(user_id))
 
-    async with Progress(message, verbs=WORKLOG_PROGRESS_VERBS, suffix=f"<b>{issue_id}</b>") as progress:
+    async with Progress(message, verbs=WORKLOG_PROGRESS_VERBS, suffix=f"<b>{esc(issue_id)}</b>") as progress:
         try:
             await asyncio.to_thread(add_worklog)
         except Exception as e:
