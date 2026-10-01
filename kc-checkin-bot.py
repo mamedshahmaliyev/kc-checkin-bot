@@ -487,8 +487,9 @@ def update_jira_status(user: dict):
         try:
             jemail, jtoken = jira_credentials
             jira = JIRA(os.getenv('JIRA_SERVER'), basic_auth=tuple(jira_credentials))
-            jql_query = f'''issuekey IN updatedBy("{jemail.strip()}", "-3d") ORDER BY created DESC'''
-            issues = jira.search_issues(jql_query, maxResults=1000, fields='summary,updated,comment')  # Increase maxResults as needed
+            # Only issues carrying my recent worklogs; maxResults=False pages past Jira Cloud's 100-per-page cap
+            jql_query = 'worklogAuthor = currentUser() AND worklogDate >= -3d ORDER BY created DESC'
+            issues = jira.search_issues(jql_query, maxResults=False, fields='summary')
             tz = ZoneInfo(user.get('timezone', 'UTC'))
             for issue in issues:
                 for wl in sorted(jira.worklogs(issue.key) or [], key=lambda w: w.started or w.created, reverse=True):
